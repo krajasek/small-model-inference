@@ -1,0 +1,46 @@
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: small-model-inference:latest
+    container_name: inference-server
+    ports:
+      - "${INFERENCE_PORT:-8000}:8000"
+    volumes:
+      # Mount model directory from host
+      # Set MODEL_PATH environment variable to your model location
+      - ${MODEL_PATH:-./models}:/models:ro
+    environment:
+      # Model configuration
+      - INFERENCE_MODEL_PATH=/models
+      # INFERENCE_MODEL_NAME - only set if you want to override the model name (optional)
+      # Server configuration
+      - INFERENCE_HOST=0.0.0.0
+      - INFERENCE_PORT=8000
+      # Device configuration
+      - INFERENCE_DEVICE=${INFERENCE_DEVICE:-cpu}
+      - INFERENCE_NUM_THREADS=${INFERENCE_NUM_THREADS:-4}
+      # Optimization settings
+      - INFERENCE_QUANTIZATION=${INFERENCE_QUANTIZATION:-none}
+      - INFERENCE_ENABLE_TORCH_COMPILE=${INFERENCE_ENABLE_TORCH_COMPILE:-false}
+      # Memory settings
+      - INFERENCE_LOW_CPU_MEM_USAGE=${INFERENCE_LOW_CPU_MEM_USAGE:-true}
+      # INFERENCE_MAX_MEMORY_GB - only set if you need a memory limit (optional)
+      # Generation settings
+      - INFERENCE_MAX_SEQUENCE_LENGTH=${INFERENCE_MAX_SEQUENCE_LENGTH:-2048}
+      - INFERENCE_MAX_NEW_TOKENS=${INFERENCE_MAX_NEW_TOKENS:-256}
+    restart: unless-stopped
+    # Resource limits (adjust based on your model size)
+    deploy:
+      resources:
+        limits:
+          memory: ${MEMORY_LIMIT:-8G}
+        reservations:
+          memory: ${MEMORY_RESERVATION:-4G}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
