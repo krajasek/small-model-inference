@@ -63,11 +63,11 @@ uv sync
 # Install dev dependencies (for testing/linting)
 uv sync --extra dev
 
-# Download a model (example: GPT-2)
-huggingface-cli download openai-community/gpt2 --local-dir ./models/gpt2
+# Download a model (example: TinyLlama-1.1B-Chat)
+huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir ./models/tinyllama-1.1b-chat
 
 # Run the server
-INFERENCE_MODEL_PATH=./models/gpt2 uv run python main.py
+INFERENCE_MODEL_PATH=./models/tinyllama-1.1b-chat uv run python main.py
 ```
 
 The server starts on `http://localhost:8000` by default.
