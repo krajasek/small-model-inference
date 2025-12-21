@@ -370,13 +370,11 @@ class InferenceEngine:
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             prompt_tokens = inputs["input_ids"].shape[1]
 
-            # Create streamer with small timeout for responsive streaming
-            # Small timeout ensures tokens are yielded promptly without busy-waiting
+            # Create streamer for token-by-token streaming
             streamer = TextIteratorStreamer(
                 self.tokenizer,
                 skip_prompt=True,
                 skip_special_tokens=True,
-                timeout=0.05,
             )
 
             # Generation kwargs
