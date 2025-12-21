@@ -61,7 +61,7 @@ USER appuser
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    # Model path - mount as volume
+    # Model configuration
     INFERENCE_MODEL_PATH=/models \
     INFERENCE_HOST=0.0.0.0 \
     INFERENCE_PORT=8000 \
@@ -69,7 +69,14 @@ ENV PATH="/app/.venv/bin:$PATH" \
     INFERENCE_NUM_THREADS=4 \
     INFERENCE_QUANTIZATION=none \
     INFERENCE_ENABLE_TORCH_COMPILE=false \
-    INFERENCE_LOW_CPU_MEM_USAGE=true
+    INFERENCE_LOW_CPU_MEM_USAGE=true \
+    # Caching (enabled by default for performance)
+    INFERENCE_ENABLE_RESPONSE_CACHE=true \
+    INFERENCE_ENABLE_PROMPT_CACHE=true \
+    INFERENCE_ENABLE_TOKENIZER_CACHE=true \
+    INFERENCE_USE_KV_CACHE=true \
+    # Batching (disabled by default)
+    INFERENCE_ENABLE_BATCHING=false
 
 EXPOSE 8000
 

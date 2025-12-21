@@ -30,6 +30,14 @@ services:
       # Generation settings
       - INFERENCE_MAX_SEQUENCE_LENGTH=${INFERENCE_MAX_SEQUENCE_LENGTH:-2048}
       - INFERENCE_MAX_NEW_TOKENS=${INFERENCE_MAX_NEW_TOKENS:-256}
+      # Caching settings (all enabled by default for performance)
+      - INFERENCE_ENABLE_RESPONSE_CACHE=${INFERENCE_ENABLE_RESPONSE_CACHE:-true}
+      - INFERENCE_ENABLE_PROMPT_CACHE=${INFERENCE_ENABLE_PROMPT_CACHE:-true}
+      - INFERENCE_ENABLE_TOKENIZER_CACHE=${INFERENCE_ENABLE_TOKENIZER_CACHE:-true}
+      - INFERENCE_USE_KV_CACHE=${INFERENCE_USE_KV_CACHE:-true}
+      # Batching (disabled by default, enable for high-throughput)
+      - INFERENCE_ENABLE_BATCHING=${INFERENCE_ENABLE_BATCHING:-false}
+      - INFERENCE_MAX_BATCH_SIZE=${INFERENCE_MAX_BATCH_SIZE:-8}
     restart: unless-stopped
     # Resource limits (adjust based on your model size)
     deploy:
