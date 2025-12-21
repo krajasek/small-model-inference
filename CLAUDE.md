@@ -57,6 +57,8 @@ src/inference/
 │   └── loader.py       # HuggingFace model loading from local paths
 ├── engine/
 │   ├── inference.py    # Core generation logic with streaming
+│   ├── cache.py        # Response, prompt, and tokenizer caching
+│   ├── batching.py     # Continuous batching for throughput
 │   └── cpu_optimizer.py# CPU-specific optimizations (threads, quantization)
 └── utils/
     └── logging.py      # Logging configuration
@@ -69,18 +71,37 @@ src/inference/
 | `/v1/completions` | POST | Text completion (sync + streaming) |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat (sync + streaming) |
 | `/v1/models` | GET | List loaded model info |
+| `/v1/cache/stats` | GET | Cache statistics and hit rates |
+| `/v1/cache/clear` | POST | Clear all caches |
 | `/health` | GET | Health check |
 
 ## Environment Variables
 
+### Core Settings
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INFERENCE_MODEL_PATH` | `/models` | Path to model weights folder |
 | `INFERENCE_DEVICE` | `auto` | Device: cpu, cuda, mps, auto |
 | `INFERENCE_PORT` | `8000` | Server port |
 | `INFERENCE_NUM_THREADS` | `4` | CPU thread count |
-| `INFERENCE_QUANTIZATION` | `none` | Quantization: none, int8 |
+| `INFERENCE_QUANTIZATION` | `none` | Quantization: none, int8, int4 |
 | `INFERENCE_ENABLE_TORCH_COMPILE` | `false` | Enable torch.compile optimization |
+
+### Caching Settings
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_ENABLE_RESPONSE_CACHE` | `true` | Cache responses for identical requests |
+| `INFERENCE_ENABLE_PROMPT_CACHE` | `true` | Cache prompt KV states |
+| `INFERENCE_ENABLE_TOKENIZER_CACHE` | `true` | Cache tokenization results |
+| `INFERENCE_USE_KV_CACHE` | `true` | Enable KV caching in generation |
+
+### Advanced Optimizations
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_ENABLE_BATCHING` | `false` | Enable continuous batching |
+| `INFERENCE_MAX_BATCH_SIZE` | `8` | Max batch size |
+| `INFERENCE_ENABLE_SPECULATIVE_DECODING` | `false` | Use draft model |
+| `INFERENCE_DRAFT_MODEL_PATH` | | Path to draft model |
 
 ## Key Dependencies
 

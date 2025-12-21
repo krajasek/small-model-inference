@@ -208,3 +208,19 @@ def _stream_chat_completion(
             yield f"data: {chunk.model_dump_json()}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/v1/cache/stats")
+async def get_cache_stats(engine: EngineDep) -> dict:
+    """Get cache statistics for monitoring."""
+    return {
+        "caches": engine.get_cache_stats(),
+        "model_info": engine.get_model_info(),
+    }
+
+
+@router.post("/v1/cache/clear")
+async def clear_caches(engine: EngineDep) -> dict:
+    """Clear all inference caches."""
+    engine.clear_caches()
+    return {"status": "ok", "message": "All caches cleared"}

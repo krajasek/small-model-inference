@@ -11,6 +11,18 @@ INFERENCE_MODEL_PATH=/path/to/model INFERENCE_DEVICE=cpu uv run python main.py
 
 The server runs on `http://localhost:8000` by default.
 
+### With Optimizations
+
+Enable caching and other optimizations for better performance:
+```bash
+INFERENCE_MODEL_PATH=/path/to/model \
+INFERENCE_DEVICE=cpu \
+INFERENCE_ENABLE_RESPONSE_CACHE=true \
+INFERENCE_ENABLE_PROMPT_CACHE=true \
+INFERENCE_QUANTIZATION=int8 \
+uv run python main.py
+```
+
 ## Health Check
 
 ```python
@@ -283,3 +295,116 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }
 }
 ```
+
+---
+
+## Cache Management
+
+The server includes multiple caching layers for improved performance. Use these endpoints to monitor and manage caches.
+
+### Get Cache Statistics
+
+```python
+import httpx
+
+response = httpx.get("http://localhost:8000/v1/cache/stats")
+print(response.json())
+```
+
+Response:
+```json
+{
+  "caches": {
+    "response_cache": {
+      "size": 42,
+      "max_size": 1000,
+      "hits": 156,
+      "misses": 89,
+      "hit_rate": 0.636
+    },
+    "prompt_cache": {
+      "size": 5,
+      "max_size": 50,
+      "hits": 230,
+      "misses": 12,
+      "hit_rate": 0.95
+    },
+    "tokenizer_cache": {
+      "size": 128,
+      "max_size": 1000,
+      "hits": 445,
+      "misses": 128,
+      "hit_rate": 0.776
+    }
+  },
+  "model_info": {
+    "model_name": "local-model",
+    "device": "cpu",
+    "quantization": "int8",
+    "kv_cache_enabled": true,
+    "static_kv_cache": false,
+    "speculative_decoding": false
+  }
+}
+```
+
+### Clear All Caches
+
+```python
+import httpx
+
+response = httpx.post("http://localhost:8000/v1/cache/clear")
+print(response.json())
+# {"status": "ok", "message": "All caches cleared"}
+```
+
+### Using curl
+
+```bash
+# Get cache stats
+curl http://localhost:8000/v1/cache/stats
+
+# Clear caches
+curl -X POST http://localhost:8000/v1/cache/clear
+```
+
+---
+
+## Performance Optimization
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| **Caching** | | |
+| `INFERENCE_ENABLE_RESPONSE_CACHE` | `true` | Cache complete responses for identical requests |
+| `INFERENCE_RESPONSE_CACHE_SIZE` | `1000` | Max cached responses |
+| `INFERENCE_RESPONSE_CACHE_TTL` | `3600` | Response cache TTL (seconds) |
+| `INFERENCE_ENABLE_PROMPT_CACHE` | `true` | Cache tokenized prompts and KV states |
+| `INFERENCE_PROMPT_CACHE_SIZE` | `50` | Max cached prompts |
+| `INFERENCE_ENABLE_TOKENIZER_CACHE` | `true` | Cache tokenization results |
+| **KV Cache** | | |
+| `INFERENCE_USE_KV_CACHE` | `true` | Enable KV caching during generation |
+| `INFERENCE_STATIC_KV_CACHE` | `false` | Use static cache allocation |
+| **Quantization** | | |
+| `INFERENCE_QUANTIZATION` | `none` | Quantization: `none`, `int8`, `int4` |
+| **Batching** | | |
+| `INFERENCE_ENABLE_BATCHING` | `false` | Enable continuous batching |
+| `INFERENCE_MAX_BATCH_SIZE` | `8` | Max requests per batch |
+| `INFERENCE_BATCH_WAIT_TIME_MS` | `50` | Max wait time for batch |
+| **Speculative Decoding** | | |
+| `INFERENCE_ENABLE_SPECULATIVE_DECODING` | `false` | Enable speculative decoding |
+| `INFERENCE_DRAFT_MODEL_PATH` | | Path to draft model |
+| `INFERENCE_NUM_SPECULATIVE_TOKENS` | `4` | Tokens to speculate per step |
+
+### Optimization Tips
+
+1. **Response Caching**: Automatically caches responses for deterministic requests (temperature ≤ 0.1). Great for repeated queries.
+
+2. **Prompt Caching**: Caches system prompts and their KV states. Speeds up chat applications with consistent system prompts.
+
+3. **Quantization**: Use `int8` for ~2x speedup with minimal quality loss. Use `int4` for maximum speed (requires bitsandbytes).
+
+4. **Batching**: Enable for high-throughput scenarios. Adds latency for single requests but improves overall throughput.
+
+5. **Speculative Decoding**: Use a smaller draft model to speed up generation. Best with models that have matching tokenizers.
