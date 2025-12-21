@@ -67,7 +67,11 @@ async def create_completion(
 
     try:
         config = request.to_generation_config()
-        generated_text, usage_stats = engine.generate(request.prompt, config)
+        generated_text, usage_stats = engine.generate(
+            request.prompt,
+            config,
+            user_id=request.user,
+        )
 
         return CompletionResponse(
             model=engine.model_name,
@@ -96,7 +100,11 @@ def _stream_completion(
         response_id = f"cmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
-        for token, is_finished in engine.generate_stream(request.prompt, config):
+        for token, is_finished in engine.generate_stream(
+            request.prompt,
+            config,
+            user_id=request.user,
+        ):
             if is_finished:
                 yield "data: [DONE]\n\n"
                 break
@@ -125,7 +133,11 @@ async def create_chat_completion(
     try:
         config = request.to_generation_config()
         prompt = request.format_prompt()
-        generated_text, usage_stats = engine.generate(prompt, config)
+        generated_text, usage_stats = engine.generate(
+            prompt,
+            config,
+            user_id=request.user,
+        )
 
         # Extract just the assistant's response (after the prompt)
         response_text = generated_text[len(prompt) :].strip()
@@ -174,7 +186,11 @@ def _stream_chat_completion(
         yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
         # Stream content
-        for token, is_finished in engine.generate_stream(prompt, config):
+        for token, is_finished in engine.generate_stream(
+            prompt,
+            config,
+            user_id=request.user,
+        ):
             if is_finished:
                 # Send final chunk
                 final_chunk = ChatCompletionChunk(
@@ -224,3 +240,19 @@ async def clear_caches(engine: EngineDep) -> dict:
     """Clear all inference caches."""
     engine.clear_caches()
     return {"status": "ok", "message": "All caches cleared"}
+
+
+@router.get("/v1/tracing/status")
+async def get_tracing_status(engine: EngineDep) -> dict:
+    """Get tracing status and configuration."""
+    tracer = engine.tracer
+    if tracer is None:
+        return {
+            "enabled": False,
+            "provider": None,
+        }
+    return {
+        "enabled": tracer.enabled,
+        "provider": "langfuse",
+        "model_name": tracer._model_name,
+    }

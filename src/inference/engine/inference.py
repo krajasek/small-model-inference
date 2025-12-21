@@ -15,6 +15,7 @@ from transformers import (
 )
 
 from ..config import Settings
+from ..observability.tracing import GenerationTrace, InferenceTracer
 from .cache import CacheManager
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class InferenceEngine:
         device: str,
         settings: Settings,
         draft_model: PreTrainedModel | None = None,
+        tracer: InferenceTracer | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -49,6 +51,7 @@ class InferenceEngine:
         self.settings = settings
         self.model_name = settings.model_name or "local-model"
         self.draft_model = draft_model
+        self.tracer = tracer
 
         # Initialize cache manager
         self.cache_manager = CacheManager(
@@ -66,11 +69,16 @@ class InferenceEngine:
         if settings.static_kv_cache:
             self._setup_static_cache()
 
+        # Set model info on tracer
+        if self.tracer:
+            self.tracer.set_model_info(self.model_name, self.get_model_info())
+
         logger.info(
             f"InferenceEngine initialized with caching: "
             f"response={settings.enable_response_cache}, "
             f"prompt={settings.enable_prompt_cache}, "
-            f"tokenizer={settings.enable_tokenizer_cache}"
+            f"tokenizer={settings.enable_tokenizer_cache}, "
+            f"tracing={tracer is not None and tracer.enabled}"
         )
 
     def _setup_static_cache(self) -> None:
@@ -82,79 +90,126 @@ class InferenceEngine:
         except Exception as e:
             logger.warning(f"Failed to enable static KV cache: {e}")
 
+    def _create_trace(
+        self,
+        name: str = "generation",
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> GenerationTrace | None:
+        """Create a trace context if tracing is enabled."""
+        if self.tracer and self.tracer.enabled:
+            return self.tracer.trace_generation(
+                name=name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        return None
+
     def generate(
-        self, prompt: str, config: GenerationConfig
+        self,
+        prompt: str,
+        config: GenerationConfig,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, int]]:
         """Generate text completion synchronously with caching.
 
         Returns:
             Tuple of (generated_text, usage_stats)
         """
-        # Check response cache first
-        if self.cache_manager.response_cache:
-            cached = self.cache_manager.response_cache.get(
-                prompt=prompt,
-                max_new_tokens=config.max_new_tokens,
+        trace = self._create_trace("completion", user_id, session_id)
+
+        if trace:
+            trace.__enter__()
+            trace.set_input(prompt=prompt)
+            trace.set_parameters(
                 temperature=config.temperature,
                 top_p=config.top_p,
                 top_k=config.top_k,
-            )
-            if cached:
-                logger.debug("Returning cached response")
-                return cached
-
-        # Tokenize with caching
-        if self.cache_manager.tokenizer_cache:
-            inputs = self.cache_manager.tokenizer_cache.tokenize(
-                prompt,
-                self.tokenizer,
-                max_length=self.settings.max_sequence_length,
-                truncation=True,
-            )
-        else:
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=self.settings.max_sequence_length,
+                max_tokens=config.max_new_tokens,
+                do_sample=config.do_sample,
+                repetition_penalty=config.repetition_penalty,
             )
 
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        prompt_tokens = inputs["input_ids"].shape[1]
+        try:
+            # Check response cache first
+            if self.cache_manager.response_cache:
+                cached = self.cache_manager.response_cache.get(
+                    prompt=prompt,
+                    max_new_tokens=config.max_new_tokens,
+                    temperature=config.temperature,
+                    top_p=config.top_p,
+                    top_k=config.top_k,
+                )
+                if cached:
+                    logger.debug("Returning cached response")
+                    if trace:
+                        trace.record_cache_hit("response")
+                        trace.set_output(text=cached[0], usage=cached[1])
+                        trace.__exit__(None, None, None)
+                    return cached
 
-        # Build generation kwargs
-        generation_kwargs = self._build_generation_kwargs(inputs, config)
+            # Tokenize with caching
+            if self.cache_manager.tokenizer_cache:
+                inputs = self.cache_manager.tokenizer_cache.tokenize(
+                    prompt,
+                    self.tokenizer,
+                    max_length=self.settings.max_sequence_length,
+                    truncation=True,
+                )
+            else:
+                inputs = self.tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.settings.max_sequence_length,
+                )
 
-        # Generate with appropriate method
-        if self.settings.enable_speculative_decoding and self.draft_model:
-            outputs = self._generate_with_speculation(inputs, generation_kwargs)
-        else:
-            outputs = self._generate_standard(generation_kwargs)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            prompt_tokens = inputs["input_ids"].shape[1]
 
-        # Decode output
-        generated_ids = outputs[0]
-        completion_tokens = len(generated_ids) - prompt_tokens
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            # Build generation kwargs
+            generation_kwargs = self._build_generation_kwargs(inputs, config)
 
-        usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
+            # Generate with appropriate method
+            if self.settings.enable_speculative_decoding and self.draft_model:
+                outputs = self._generate_with_speculation(inputs, generation_kwargs)
+            else:
+                outputs = self._generate_standard(generation_kwargs)
 
-        # Cache the response
-        if self.cache_manager.response_cache:
-            self.cache_manager.response_cache.put(
-                prompt=prompt,
-                max_new_tokens=config.max_new_tokens,
-                temperature=config.temperature,
-                top_p=config.top_p,
-                top_k=config.top_k,
-                response=generated_text,
-                usage=usage,
-            )
+            # Decode output
+            generated_ids = outputs[0]
+            completion_tokens = len(generated_ids) - prompt_tokens
+            generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-        return generated_text, usage
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+
+            # Cache the response
+            if self.cache_manager.response_cache:
+                self.cache_manager.response_cache.put(
+                    prompt=prompt,
+                    max_new_tokens=config.max_new_tokens,
+                    temperature=config.temperature,
+                    top_p=config.top_p,
+                    top_k=config.top_k,
+                    response=generated_text,
+                    usage=usage,
+                )
+
+            if trace:
+                trace.set_output(text=generated_text, usage=usage)
+                trace.__exit__(None, None, None)
+
+            return generated_text, usage
+
+        except Exception as e:
+            if trace:
+                trace.__exit__(type(e), e, e.__traceback__)
+            raise
 
     def _build_generation_kwargs(
         self,
@@ -176,9 +231,7 @@ class InferenceEngine:
         }
         return kwargs
 
-    def _generate_standard(
-        self, generation_kwargs: dict[str, Any]
-    ) -> torch.Tensor:
+    def _generate_standard(self, generation_kwargs: dict[str, Any]) -> torch.Tensor:
         """Standard generation without speculation."""
         with torch.inference_mode():
             return self.model.generate(**generation_kwargs)
@@ -193,8 +246,7 @@ class InferenceEngine:
 
         # Remove inputs from kwargs since we pass assistant_model separately
         gen_kwargs = {
-            k: v for k, v in generation_kwargs.items()
-            if k not in ("input_ids", "attention_mask")
+            k: v for k, v in generation_kwargs.items() if k not in ("input_ids", "attention_mask")
         }
 
         with torch.inference_mode():
@@ -272,63 +324,113 @@ class InferenceEngine:
         return generated_text, usage
 
     def generate_stream(
-        self, prompt: str, config: GenerationConfig
+        self,
+        prompt: str,
+        config: GenerationConfig,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> Iterator[tuple[str, bool]]:
         """Generate text completion with streaming.
 
         Yields:
             Tuples of (token_text, is_finished)
         """
-        # Tokenize with caching
-        if self.cache_manager.tokenizer_cache:
-            inputs = self.cache_manager.tokenizer_cache.tokenize(
-                prompt,
+        trace = self._create_trace("stream_completion", user_id, session_id)
+
+        if trace:
+            trace.__enter__()
+            trace.set_input(prompt=prompt)
+            trace.set_parameters(
+                temperature=config.temperature,
+                top_p=config.top_p,
+                top_k=config.top_k,
+                max_tokens=config.max_new_tokens,
+                do_sample=config.do_sample,
+                repetition_penalty=config.repetition_penalty,
+                streaming=True,
+            )
+
+        try:
+            # Tokenize with caching
+            if self.cache_manager.tokenizer_cache:
+                inputs = self.cache_manager.tokenizer_cache.tokenize(
+                    prompt,
+                    self.tokenizer,
+                    max_length=self.settings.max_sequence_length,
+                    truncation=True,
+                )
+            else:
+                inputs = self.tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=self.settings.max_sequence_length,
+                )
+
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            prompt_tokens = inputs["input_ids"].shape[1]
+
+            # Create streamer
+            streamer = TextIteratorStreamer(
                 self.tokenizer,
-                max_length=self.settings.max_sequence_length,
-                truncation=True,
-            )
-        else:
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=self.settings.max_sequence_length,
+                skip_prompt=True,
+                skip_special_tokens=True,
             )
 
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Generation kwargs
+            generation_kwargs: dict[str, Any] = {
+                **inputs,
+                "streamer": streamer,
+                "max_new_tokens": config.max_new_tokens,
+                "temperature": config.temperature if config.do_sample else 1.0,
+                "top_p": config.top_p if config.do_sample else 1.0,
+                "top_k": config.top_k if config.do_sample else 0,
+                "do_sample": config.do_sample,
+                "repetition_penalty": config.repetition_penalty,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "use_cache": self.settings.use_kv_cache,
+            }
 
-        # Create streamer
-        streamer = TextIteratorStreamer(
-            self.tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-        )
+            # Run generation in a separate thread
+            thread = Thread(target=self._generate_in_thread, args=(generation_kwargs,))
+            thread.start()
 
-        # Generation kwargs
-        generation_kwargs: dict[str, Any] = {
-            **inputs,
-            "streamer": streamer,
-            "max_new_tokens": config.max_new_tokens,
-            "temperature": config.temperature if config.do_sample else 1.0,
-            "top_p": config.top_p if config.do_sample else 1.0,
-            "top_k": config.top_k if config.do_sample else 0,
-            "do_sample": config.do_sample,
-            "repetition_penalty": config.repetition_penalty,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "use_cache": self.settings.use_kv_cache,
-        }
+            # Track generated tokens for metrics
+            generated_text_parts: list[str] = []
+            first_token = True
 
-        # Run generation in a separate thread
-        thread = Thread(target=self._generate_in_thread, args=(generation_kwargs,))
-        thread.start()
+            # Yield tokens as they're generated
+            for text in streamer:
+                if first_token and trace:
+                    trace.record_first_token()
+                    first_token = False
+                generated_text_parts.append(text)
+                yield text, False
 
-        # Yield tokens as they're generated
-        for text in streamer:
-            yield text, False
+            thread.join()
 
-        thread.join()
-        yield "", True
+            # Record final metrics
+            if trace:
+                full_text = "".join(generated_text_parts)
+                # Estimate completion tokens from generated text
+                completion_tokens = len(self.tokenizer.encode(full_text))
+                trace.set_output(
+                    text=full_text,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                )
+                trace.__exit__(None, None, None)
+
+            yield "", True
+
+        except Exception as e:
+            if trace:
+                trace.__exit__(type(e), e, e.__traceback__)
+            raise
 
     def _generate_in_thread(self, generation_kwargs: dict[str, Any]) -> None:
         """Run generation in a separate thread for streaming."""

@@ -329,9 +329,7 @@ class TestCacheManager:
 
         # Add some data to caches
         if manager.response_cache:
-            manager.response_cache.put(
-                "prompt", 50, 0.0, 1.0, 50, "response", {"total_tokens": 1}
-            )
+            manager.response_cache.put("prompt", 50, 0.0, 1.0, 50, "response", {"total_tokens": 1})
 
         manager.clear_all()
 

@@ -400,9 +400,7 @@ class CacheManager:
             else None
         )
         self.tokenizer_cache = (
-            TokenizerCache(max_size=tokenizer_cache_size)
-            if enable_tokenizer_cache
-            else None
+            TokenizerCache(max_size=tokenizer_cache_size) if enable_tokenizer_cache else None
         )
 
         logger.info(
@@ -422,11 +420,7 @@ class CacheManager:
     def stats(self) -> dict[str, Any]:
         """Get statistics for all caches."""
         return {
-            "response_cache": (
-                self.response_cache.stats() if self.response_cache else None
-            ),
+            "response_cache": (self.response_cache.stats() if self.response_cache else None),
             "prompt_cache": self.prompt_cache.stats() if self.prompt_cache else None,
-            "tokenizer_cache": (
-                self.tokenizer_cache.stats() if self.tokenizer_cache else None
-            ),
+            "tokenizer_cache": (self.tokenizer_cache.stats() if self.tokenizer_cache else None),
         }

@@ -60,6 +60,8 @@ src/inference/
 │   ├── cache.py        # Response, prompt, and tokenizer caching
 │   ├── batching.py     # Continuous batching for throughput
 │   └── cpu_optimizer.py# CPU-specific optimizations (threads, quantization)
+├── observability/
+│   └── tracing.py      # Langfuse integration for metrics and tracing
 └── utils/
     └── logging.py      # Logging configuration
 ```
@@ -73,6 +75,7 @@ src/inference/
 | `/v1/models` | GET | List loaded model info |
 | `/v1/cache/stats` | GET | Cache statistics and hit rates |
 | `/v1/cache/clear` | POST | Clear all caches |
+| `/v1/tracing/status` | GET | Tracing status and configuration |
 | `/health` | GET | Health check |
 
 ## Environment Variables
@@ -103,11 +106,20 @@ src/inference/
 | `INFERENCE_ENABLE_SPECULATIVE_DECODING` | `false` | Use draft model |
 | `INFERENCE_DRAFT_MODEL_PATH` | | Path to draft model |
 
+### Observability (Langfuse)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_ENABLE_TRACING` | `false` | Enable Langfuse tracing |
+| `INFERENCE_LANGFUSE_PUBLIC_KEY` | | Langfuse public key |
+| `INFERENCE_LANGFUSE_SECRET_KEY` | | Langfuse secret key |
+| `INFERENCE_LANGFUSE_HOST` | | Custom Langfuse host |
+
 ## Key Dependencies
 
 - PyTorch 2.2.2 (pinned for older Intel CPU support)
 - transformers, accelerate for model loading
 - FastAPI, uvicorn for REST API
+- langfuse for observability and tracing
 
 ## Docker
 

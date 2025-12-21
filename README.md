@@ -11,6 +11,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - **Quantization** - int8 and int4 quantization support for reduced memory and faster inference
 - **Continuous Batching** - Optional request batching for high-throughput scenarios
 - **Speculative Decoding** - Use draft models to accelerate generation
+- **Observability** - Langfuse integration for tracing, metrics, and monitoring
 - **Docker Ready** - Multi-stage Dockerfile with CPU-only PyTorch for minimal image size
 
 ## Table of Contents
@@ -20,6 +21,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Performance Optimization](#performance-optimization)
+- [Observability](#observability)
 - [Docker Deployment](#docker-deployment)
 - [Examples](#examples)
 
@@ -85,6 +87,7 @@ The server starts on `http://localhost:8000` by default.
 | `/v1/models` | GET | List loaded model info |
 | `/v1/cache/stats` | GET | Cache statistics and hit rates |
 | `/v1/cache/clear` | POST | Clear all caches |
+| `/v1/tracing/status` | GET | Tracing status and configuration |
 | `/health` | GET | Health check |
 
 ### Request Parameters
@@ -100,6 +103,7 @@ The server starts on `http://localhost:8000` by default.
 | `do_sample` | bool | true | Enable sampling (false = greedy) |
 | `repetition_penalty` | float | 1.1 | Repetition penalty (1.0-2.0) |
 | `stream` | bool | false | Enable streaming response |
+| `user` | string | null | User ID for tracing (optional) |
 
 ### Response Format
 
@@ -187,6 +191,21 @@ All configuration is done via environment variables with the `INFERENCE_` prefix
 | `INFERENCE_DRAFT_MODEL_PATH` | | Path to smaller draft model |
 | `INFERENCE_NUM_SPECULATIVE_TOKENS` | `4` | Tokens to speculate per step |
 
+### Observability (Langfuse)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_ENABLE_TRACING` | `false` | Enable Langfuse tracing |
+| `INFERENCE_LANGFUSE_PUBLIC_KEY` | | Langfuse public key |
+| `INFERENCE_LANGFUSE_SECRET_KEY` | | Langfuse secret key |
+| `INFERENCE_LANGFUSE_HOST` | | Custom Langfuse host URL |
+| `INFERENCE_LANGFUSE_DEBUG` | `false` | Enable debug logging |
+
+Or use standard Langfuse environment variables:
+- `LANGFUSE_PUBLIC_KEY`
+- `LANGFUSE_SECRET_KEY`
+- `LANGFUSE_HOST`
+
 ---
 
 ## Performance Optimization
@@ -224,6 +243,57 @@ INFERENCE_QUANTIZATION=int8 uv run python main.py
 | 1-3B params | 8-12 GB | 4-8 | int8 |
 | 3-7B params | 16-24 GB | 8 | int8 |
 | 7-10B params | 24-32 GB | 8+ | int8 |
+
+---
+
+## Observability
+
+The server integrates with [Langfuse](https://langfuse.com) for observability and tracing. When enabled, it captures:
+
+- **Generation latency** - Total time and time-to-first-token for streaming
+- **Token usage** - Prompt tokens, completion tokens, and tokens per second
+- **Model parameters** - Temperature, top_p, top_k, and other generation settings
+- **Cache metrics** - Cache hits/misses for response, prompt, and tokenizer caches
+- **Errors** - Exception details and error traces
+
+### Enabling Tracing
+
+```bash
+INFERENCE_ENABLE_TRACING=true \
+INFERENCE_LANGFUSE_PUBLIC_KEY=pk-lf-... \
+INFERENCE_LANGFUSE_SECRET_KEY=sk-lf-... \
+uv run python main.py
+```
+
+Or use standard Langfuse environment variables:
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-... \
+LANGFUSE_SECRET_KEY=sk-lf-... \
+INFERENCE_ENABLE_TRACING=true \
+uv run python main.py
+```
+
+### User Tracking
+
+Pass a `user` field in requests to track usage by user:
+
+```python
+response = httpx.post(
+    "http://localhost:8000/v1/completions",
+    json={
+        "prompt": "Hello",
+        "max_tokens": 50,
+        "user": "user-123",  # Tracked in Langfuse
+    },
+)
+```
+
+### Check Tracing Status
+
+```bash
+curl http://localhost:8000/v1/tracing/status
+# {"enabled": true, "provider": "langfuse", "model_name": "local-model"}
+```
 
 ---
 

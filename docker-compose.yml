@@ -38,6 +38,11 @@ services:
       # Batching (disabled by default, enable for high-throughput)
       - INFERENCE_ENABLE_BATCHING=${INFERENCE_ENABLE_BATCHING:-false}
       - INFERENCE_MAX_BATCH_SIZE=${INFERENCE_MAX_BATCH_SIZE:-8}
+      # Observability (disabled by default)
+      - INFERENCE_ENABLE_TRACING=${INFERENCE_ENABLE_TRACING:-false}
+      - INFERENCE_LANGFUSE_PUBLIC_KEY=${INFERENCE_LANGFUSE_PUBLIC_KEY:-}
+      - INFERENCE_LANGFUSE_SECRET_KEY=${INFERENCE_LANGFUSE_SECRET_KEY:-}
+      - INFERENCE_LANGFUSE_HOST=${INFERENCE_LANGFUSE_HOST:-}
     restart: unless-stopped
     # Resource limits (adjust based on your model size)
     deploy:

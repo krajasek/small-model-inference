@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     draft_model_path: str | None = None  # Path to smaller draft model
     num_speculative_tokens: int = 4  # Tokens to speculate per step
 
+    # Observability settings (Langfuse)
+    enable_tracing: bool = False  # Enable Langfuse tracing
+    langfuse_public_key: str | None = None  # Or set LANGFUSE_PUBLIC_KEY env var
+    langfuse_secret_key: str | None = None  # Or set LANGFUSE_SECRET_KEY env var
+    langfuse_host: str | None = None  # Custom host (default: cloud.langfuse.com)
+    langfuse_debug: bool = False  # Enable Langfuse debug logging
+    langfuse_flush_at: int = 15  # Number of events before flushing
+    langfuse_flush_interval: float = 10.0  # Seconds between flushes
+
 
 def get_settings() -> Settings:
     """Get cached settings instance."""

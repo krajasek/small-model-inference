@@ -8,10 +8,11 @@ from fastapi import FastAPI
 
 from .api.routes import router
 from .config import Settings
+from .engine.batching import ContinuousBatcher
 from .engine.cpu_optimizer import CPUOptimizer
 from .engine.inference import InferenceEngine, load_draft_model
-from .engine.batching import ContinuousBatcher
 from .models.loader import ModelLoader, resolve_device
+from .observability.tracing import InferenceTracer, init_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if draft_model and device == "cpu":
             draft_model = optimizer.optimize_model(draft_model)
 
+    # Initialize tracer if tracing is enabled
+    tracer: InferenceTracer | None = None
+    if settings.enable_tracing:
+        tracer = init_tracer(
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            host=settings.langfuse_host,
+            enabled=True,
+            debug=settings.langfuse_debug,
+        )
+        logger.info("Langfuse tracing initialized")
+
     # Create inference engine
     engine = InferenceEngine(
-        model, tokenizer, device, settings, draft_model=draft_model
+        model, tokenizer, device, settings, draft_model=draft_model, tracer=tracer
     )
     app.state.engine = engine
+    app.state.tracer = tracer
 
     # Start continuous batcher if enabled
     batcher = None
@@ -79,13 +93,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         f"prompt_cache={settings.enable_prompt_cache}, "
         f"tokenizer_cache={settings.enable_tokenizer_cache}, "
         f"batching={settings.enable_batching}, "
-        f"speculative={settings.enable_speculative_decoding and draft_model is not None}"
+        f"speculative={settings.enable_speculative_decoding and draft_model is not None}, "
+        f"tracing={tracer is not None and tracer.enabled}"
     )
 
     yield
 
     # Cleanup on shutdown
     logger.info("Shutting down, cleaning up resources...")
+
+    # Flush and shutdown tracer
+    if tracer:
+        tracer.shutdown()
+        logger.info("Langfuse tracer shut down")
 
     # Stop batcher
     if batcher:

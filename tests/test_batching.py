@@ -102,9 +102,7 @@ class TestContinuousBatcher:
         assert not batcher._running
 
     @pytest.mark.asyncio
-    async def test_start_and_stop(
-        self, mock_model: MagicMock, mock_tokenizer: MagicMock
-    ) -> None:
+    async def test_start_and_stop(self, mock_model: MagicMock, mock_tokenizer: MagicMock) -> None:
         """Test starting and stopping the batcher."""
         batcher = ContinuousBatcher(
             model=mock_model,
@@ -119,9 +117,7 @@ class TestContinuousBatcher:
         assert not batcher._running
 
     @pytest.mark.asyncio
-    async def test_submit_request(
-        self, mock_model: MagicMock, mock_tokenizer: MagicMock
-    ) -> None:
+    async def test_submit_request(self, mock_model: MagicMock, mock_tokenizer: MagicMock) -> None:
         """Test submitting a request."""
         batcher = ContinuousBatcher(
             model=mock_model,
@@ -162,9 +158,7 @@ class TestContinuousBatcher:
         assert "pending_requests" in stats
         assert "running" in stats
 
-    def test_generate_batch_sync(
-        self, mock_model: MagicMock, mock_tokenizer: MagicMock
-    ) -> None:
+    def test_generate_batch_sync(self, mock_model: MagicMock, mock_tokenizer: MagicMock) -> None:
         """Test synchronous batch generation."""
         batcher = ContinuousBatcher(
             model=mock_model,

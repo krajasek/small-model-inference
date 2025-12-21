@@ -85,8 +85,6 @@ class CPUOptimizer:
 
         if is_bitsandbytes_available():
             try:
-                from transformers import BitsAndBytesConfig
-
                 # Note: int4 via bitsandbytes requires loading with quantization config
                 # This is a post-hoc conversion which may have limitations
                 logger.warning(
@@ -127,9 +125,7 @@ def get_quantization_config(quantization: str) -> dict[str, Any] | None:
     """
     if quantization == "int4":
         if not is_bitsandbytes_available():
-            logger.warning(
-                "bitsandbytes not available. Install with: pip install bitsandbytes"
-            )
+            logger.warning("bitsandbytes not available. Install with: pip install bitsandbytes")
             return None
 
         try:

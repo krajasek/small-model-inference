@@ -143,10 +143,10 @@ class ContinuousBatcher:
                         timeout=remaining_time,
                     )
                     batch.append(request)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         return batch
@@ -258,9 +258,7 @@ class ContinuousBatcher:
     def stats(self) -> dict[str, Any]:
         """Get batching statistics."""
         avg_batch_size = (
-            self._total_batch_size / self._total_batches
-            if self._total_batches > 0
-            else 0.0
+            self._total_batch_size / self._total_batches if self._total_batches > 0 else 0.0
         )
         return {
             "total_batches": self._total_batches,

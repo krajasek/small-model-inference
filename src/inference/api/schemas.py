@@ -30,6 +30,8 @@ class CompletionRequest(BaseModel):
     do_sample: bool = True
     repetition_penalty: float = Field(1.1, ge=1.0, le=2.0)
     stream: bool = False
+    # Tracing fields (optional)
+    user: str | None = Field(None, description="User ID for tracing")
 
     def to_generation_config(self) -> GenerationConfig:
         """Convert to GenerationConfig."""
@@ -81,6 +83,8 @@ class ChatCompletionRequest(BaseModel):
     do_sample: bool = True
     repetition_penalty: float = Field(1.1, ge=1.0, le=2.0)
     stream: bool = False
+    # Tracing fields (optional)
+    user: str | None = Field(None, description="User ID for tracing")
 
     def to_generation_config(self) -> GenerationConfig:
         """Convert to GenerationConfig."""

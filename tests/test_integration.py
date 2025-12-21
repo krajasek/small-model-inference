@@ -147,9 +147,7 @@ class TestCompletionsEndpoint:
         assert data["usage"]["completion_tokens"] >= 0
         assert data["usage"]["total_tokens"] > 0
 
-    def test_completion_with_sampling_params(
-        self, integration_client: TestClient
-    ) -> None:
+    def test_completion_with_sampling_params(self, integration_client: TestClient) -> None:
         """Test completion with various sampling parameters."""
         response = integration_client.post(
             "/v1/completions",
