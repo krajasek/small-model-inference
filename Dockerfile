@@ -76,7 +76,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     INFERENCE_ENABLE_TOKENIZER_CACHE=true \
     INFERENCE_USE_KV_CACHE=true \
     # Batching (disabled by default)
-    INFERENCE_ENABLE_BATCHING=false
+    INFERENCE_ENABLE_BATCHING=false \
+    # Observability (disabled by default)
+    INFERENCE_ENABLE_TRACING=false
 
 EXPOSE 8000
 
