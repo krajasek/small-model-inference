@@ -5,6 +5,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 ## Features
 
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI's `/v1/completions` and `/v1/chat/completions` endpoints
+- **Dual Backend Support** - Choose between PyTorch/HuggingFace or llama-cpp-python for inference
 - **Streaming Support** - Real-time token streaming for both completion types
 - **CPU Optimized** - Designed for efficient CPU inference with threading and quantization
 - **Multiple Caching Layers** - Response, prompt/KV, and tokenizer caching for faster responses
@@ -18,6 +19,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 
 - [Quick Start](#quick-start)
 - [Installation](#installation)
+- [Backend Selection](#backend-selection)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Performance Optimization](#performance-optimization)
@@ -73,6 +75,60 @@ INFERENCE_MODEL_PATH=./models/tinyllama-1.1b-chat uv run python main.py
 ```
 
 The server starts on `http://localhost:8000` by default.
+
+---
+
+## Backend Selection
+
+The server supports two inference backends:
+
+### PyTorch Backend (Default)
+
+Uses HuggingFace Transformers for inference. Best for:
+- HuggingFace model format (safetensors/bin files)
+- Advanced features (speculative decoding, prompt caching)
+- GPU acceleration with CUDA/MPS
+
+```bash
+# PyTorch backend (default)
+INFERENCE_BACKEND=pytorch \
+INFERENCE_MODEL_PATH=./models/tinyllama-1.1b-chat \
+uv run python main.py
+```
+
+### llama-cpp Backend
+
+Uses llama-cpp-python for optimized CPU inference. Best for:
+- GGUF quantized models
+- Faster CPU inference with better streaming
+- Lower memory usage
+
+```bash
+# Install llama-cpp-python dependency
+uv sync --extra llama-cpp
+
+# Download a GGUF model
+huggingface-cli download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \
+  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  --local-dir ./models
+
+# Run with llama-cpp backend
+INFERENCE_BACKEND=llama-cpp \
+INFERENCE_MODEL_PATH=./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+uv run python main.py
+```
+
+### Backend Comparison
+
+| Feature | PyTorch | llama-cpp |
+|---------|---------|-----------|
+| Model format | HuggingFace (safetensors) | GGUF |
+| CPU streaming | Basic | Optimized |
+| GPU support | CUDA, MPS | Optional GPU layers |
+| Memory usage | Higher | Lower (quantized) |
+| Prompt caching | Yes | Internal |
+| Speculative decoding | Yes | No |
+| Response caching | Yes | No |
 
 ---
 
@@ -145,7 +201,8 @@ All configuration is done via environment variables with the `INFERENCE_` prefix
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_MODEL_PATH` | `/models` | Path to model weights folder |
+| `INFERENCE_BACKEND` | `pytorch` | Backend: `pytorch` or `llama-cpp` |
+| `INFERENCE_MODEL_PATH` | `/models` | Path to model weights folder or GGUF file |
 | `INFERENCE_MODEL_NAME` | (auto) | Override model name in responses |
 | `INFERENCE_DEVICE` | `auto` | Device: cpu, cuda, mps, auto |
 | `INFERENCE_PORT` | `8000` | Server port |
@@ -153,6 +210,14 @@ All configuration is done via environment variables with the `INFERENCE_` prefix
 | `INFERENCE_NUM_THREADS` | `4` | CPU thread count |
 | `INFERENCE_MAX_SEQUENCE_LENGTH` | `2048` | Maximum input sequence length |
 | `INFERENCE_MAX_NEW_TOKENS` | `256` | Default max tokens to generate |
+
+### llama-cpp Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_LLAMA_CPP_N_CTX` | `2048` | Context size |
+| `INFERENCE_LLAMA_CPP_N_GPU_LAYERS` | `0` | GPU layers (0 = CPU only) |
+| `INFERENCE_LLAMA_CPP_N_BATCH` | `512` | Batch size for prompt processing |
 
 ### Optimization Settings
 

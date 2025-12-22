@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..engine.inference import GenerationConfig
+from ..backends.base import GenerationConfig
 
 
 # Shared schemas

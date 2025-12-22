@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..engine.inference import InferenceEngine
+from ..backends.base import InferenceBackend
 from .dependencies import get_engine
 from .schemas import (
     ChatCompletionChoice,
@@ -29,7 +29,7 @@ from .schemas import (
 )
 
 # Type alias for dependency injection
-EngineDep = Annotated[InferenceEngine, Depends(get_engine)]
+EngineDep = Annotated[InferenceBackend, Depends(get_engine)]
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ async def create_completion(
 
 def _stream_completion(
     request: CompletionRequest,
-    engine: InferenceEngine,
+    engine: InferenceBackend,
 ) -> StreamingResponse:
     """Stream completion response."""
 
@@ -160,7 +160,7 @@ async def create_chat_completion(
 
 def _stream_chat_completion(
     request: ChatCompletionRequest,
-    engine: InferenceEngine,
+    engine: InferenceBackend,
 ) -> StreamingResponse:
     """Stream chat completion response."""
 
@@ -243,9 +243,9 @@ async def clear_caches(engine: EngineDep) -> dict:
 
 
 @router.get("/v1/tracing/status")
-async def get_tracing_status(engine: EngineDep) -> dict:
+async def get_tracing_status(request: Request) -> dict:
     """Get tracing status and configuration."""
-    tracer = engine.tracer
+    tracer = getattr(request.app.state, "tracer", None)
     if tracer is None:
         return {
             "enabled": False,

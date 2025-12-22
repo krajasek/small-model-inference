@@ -30,6 +30,9 @@ dev = [
     "httpx>=0.26.0",
     "pre-commit>=3.6.0",
 ]
+llama-cpp = [
+    "llama-cpp-python>=0.2.0",
+]
 
 [build-system]
 requires = ["hatchling"]

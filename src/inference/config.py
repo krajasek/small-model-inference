@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # Backend selection
+    backend: Literal["pytorch", "llama-cpp"] = "pytorch"
+
     # Model configuration
     model_path: str = "/models"
     model_name: str | None = None  # Optional override for model name in responses
@@ -25,6 +28,11 @@ class Settings(BaseSettings):
     # Device configuration
     device: Literal["cpu", "cuda", "mps", "auto"] = "auto"
     num_threads: int = 4  # CPU thread count
+
+    # llama-cpp specific settings
+    llama_cpp_n_ctx: int = 2048  # Context size
+    llama_cpp_n_gpu_layers: int = 0  # GPU layers (0 = CPU only)
+    llama_cpp_n_batch: int = 512  # Batch size for prompt processing
 
     # Optimization settings
     enable_torch_compile: bool = False  # Disabled by default for compatibility

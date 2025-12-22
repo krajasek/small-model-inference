@@ -14,11 +14,13 @@ class TestSettings:
         # Clear INFERENCE_ prefixed env vars to test actual defaults
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("INFERENCE_")}
         with patch.dict(os.environ, clean_env, clear=True):
-            settings = Settings()
+            # Create Settings with _env_file=None to skip .env file reading
+            settings = Settings(_env_file=None)
 
         assert settings.host == "0.0.0.0"
         assert settings.port == 8000
         assert settings.model_path == "/models"
+        assert settings.backend == "pytorch"
         assert settings.device == "auto"
         assert settings.num_threads == 4
         assert settings.enable_torch_compile is False
@@ -28,6 +30,10 @@ class TestSettings:
         assert settings.max_sequence_length == 2048
         assert settings.max_new_tokens == 256
         assert settings.max_parameters == 10_000_000_000
+        # llama-cpp settings
+        assert settings.llama_cpp_n_ctx == 2048
+        assert settings.llama_cpp_n_gpu_layers == 0
+        assert settings.llama_cpp_n_batch == 512
 
     def test_model_name_optional(self) -> None:
         """Test that model_name is optional."""

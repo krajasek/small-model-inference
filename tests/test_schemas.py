@@ -21,7 +21,7 @@ from inference.api.schemas import (
     ModelListResponse,
     Usage,
 )
-from inference.engine.inference import GenerationConfig
+from inference.backends.base import GenerationConfig
 
 
 class TestUsage:

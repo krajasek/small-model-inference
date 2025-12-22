@@ -53,10 +53,14 @@ src/inference/
 │   ├── routes.py       # API endpoints (/v1/completions, /v1/chat/completions)
 │   ├── schemas.py      # OpenAI-compatible request/response schemas
 │   └── dependencies.py # FastAPI dependency injection
+├── backends/           # Pluggable inference backends
+│   ├── base.py         # InferenceBackend protocol and GenerationConfig
+│   ├── pytorch.py      # PyTorch/HuggingFace backend
+│   └── llamacpp.py     # llama-cpp-python backend (GGUF models)
 ├── models/
 │   └── loader.py       # HuggingFace model loading from local paths
 ├── engine/
-│   ├── inference.py    # Core generation logic with streaming
+│   ├── inference.py    # Legacy engine (used by PyTorch backend)
 │   ├── cache.py        # Response, prompt, and tokenizer caching
 │   ├── batching.py     # Continuous batching for throughput
 │   └── cpu_optimizer.py# CPU-specific optimizations (threads, quantization)
@@ -64,6 +68,22 @@ src/inference/
 │   └── tracing.py      # Langfuse integration for metrics and tracing
 └── utils/
     └── logging.py      # Logging configuration
+```
+
+## Backend Selection
+
+The server supports two backends, selectable via `INFERENCE_BACKEND`:
+
+- **pytorch** (default): Uses HuggingFace Transformers. Supports HuggingFace model format.
+- **llama-cpp**: Uses llama-cpp-python. Supports GGUF model format with optimized CPU streaming.
+
+```bash
+# PyTorch backend (default)
+INFERENCE_BACKEND=pytorch INFERENCE_MODEL_PATH=/path/to/hf/model uv run python main.py
+
+# llama-cpp backend (for GGUF models)
+uv sync --extra llama-cpp  # Install optional dependency first
+INFERENCE_BACKEND=llama-cpp INFERENCE_MODEL_PATH=/path/to/model.gguf uv run python main.py
 ```
 
 ## API Endpoints
@@ -83,12 +103,20 @@ src/inference/
 ### Core Settings
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_MODEL_PATH` | `/models` | Path to model weights folder |
+| `INFERENCE_BACKEND` | `pytorch` | Backend: pytorch or llama-cpp |
+| `INFERENCE_MODEL_PATH` | `/models` | Path to model weights folder or GGUF file |
 | `INFERENCE_DEVICE` | `auto` | Device: cpu, cuda, mps, auto |
 | `INFERENCE_PORT` | `8000` | Server port |
 | `INFERENCE_NUM_THREADS` | `4` | CPU thread count |
-| `INFERENCE_QUANTIZATION` | `none` | Quantization: none, int8, int4 |
+| `INFERENCE_QUANTIZATION` | `none` | Quantization: none, int8, int4 (PyTorch) |
 | `INFERENCE_ENABLE_TORCH_COMPILE` | `false` | Enable torch.compile optimization |
+
+### llama-cpp Settings
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_LLAMA_CPP_N_CTX` | `2048` | Context size |
+| `INFERENCE_LLAMA_CPP_N_GPU_LAYERS` | `0` | GPU layers (0 = CPU only) |
+| `INFERENCE_LLAMA_CPP_N_BATCH` | `512` | Batch size for prompt processing |
 
 ### Caching Settings
 | Variable | Default | Description |
@@ -120,6 +148,7 @@ src/inference/
 - transformers, accelerate for model loading
 - FastAPI, uvicorn for REST API
 - langfuse for observability and tracing
+- llama-cpp-python (optional) for GGUF model support
 
 ## Docker
 
