@@ -1,7 +1,11 @@
-"""Integration tests with actual model inference.
+"""Integration tests for PyTorch backend with actual model inference.
 
-These tests use a tiny GPT-2 model to verify end-to-end functionality.
+These tests use a tiny GPT-2 model to verify end-to-end functionality
+with the PyTorch/HuggingFace backend (default).
+
 They are slower than unit tests and require model download on first run.
+
+For llama-cpp backend tests, see test_integration_llamacpp.py.
 """
 
 import os
@@ -61,12 +65,14 @@ def model_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def integration_settings(model_path: Path) -> Settings:
-    """Create settings for integration testing."""
+    """Create settings for integration testing with PyTorch backend."""
     # Clear any INFERENCE_ env vars to use our test settings
     clean_env = {k: v for k, v in os.environ.items() if not k.startswith("INFERENCE_")}
 
     with patch.dict(os.environ, clean_env, clear=True):
         return Settings(
+            _env_file=None,  # Don't read .env file
+            backend="pytorch",  # Explicitly use PyTorch backend
             model_path=str(model_path),
             model_name="tiny-gpt2-test",
             device="cpu",
