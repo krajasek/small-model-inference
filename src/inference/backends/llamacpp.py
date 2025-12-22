@@ -177,12 +177,17 @@ class LlamaCppBackend:
             if trace:
                 trace.set_output(text=full_text, usage=usage)
                 trace.__exit__(None, None, None)
+                # Flush immediately to ensure trace is sent
+                if self._tracer:
+                    self._tracer.flush()
 
             return full_text, usage
 
         except Exception as e:
             if trace:
                 trace.__exit__(type(e), e, e.__traceback__)
+                if self._tracer:
+                    self._tracer.flush()
             raise
 
     def generate_stream(
@@ -257,12 +262,17 @@ class LlamaCppBackend:
                     },
                 )
                 trace.__exit__(None, None, None)
+                # Flush immediately to ensure trace is sent
+                if self._tracer:
+                    self._tracer.flush()
 
             yield "", True
 
         except Exception as e:
             if trace:
                 trace.__exit__(type(e), e, e.__traceback__)
+                if self._tracer:
+                    self._tracer.flush()
             raise
 
     def get_model_info(self) -> dict[str, Any]:

@@ -220,6 +220,7 @@ class TestGenerationTrace:
             pass
 
         mock_client.start_generation.assert_called_once()
+        mock_generation.update.assert_called_once()
         mock_generation.end.assert_called_once()
 
     def test_set_input_prompt(self) -> None:

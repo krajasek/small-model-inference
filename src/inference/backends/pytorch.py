@@ -241,12 +241,17 @@ class PyTorchBackend:
             if trace:
                 trace.set_output(text=generated_text, usage=usage)
                 trace.__exit__(None, None, None)
+                # Flush immediately to ensure trace is sent
+                if self._tracer:
+                    self._tracer.flush()
 
             return generated_text, usage
 
         except Exception as e:
             if trace:
                 trace.__exit__(type(e), e, e.__traceback__)
+                if self._tracer:
+                    self._tracer.flush()
             raise
 
     def _build_generation_kwargs(
@@ -395,12 +400,17 @@ class PyTorchBackend:
                     },
                 )
                 trace.__exit__(None, None, None)
+                # Flush immediately to ensure trace is sent
+                if self._tracer:
+                    self._tracer.flush()
 
             yield "", True
 
         except Exception as e:
             if trace:
                 trace.__exit__(type(e), e, e.__traceback__)
+                if self._tracer:
+                    self._tracer.flush()
             raise
 
     def _generate_in_thread(self, generation_kwargs: dict[str, Any]) -> None:

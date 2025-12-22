@@ -75,6 +75,7 @@ class InferenceTracer:
             return
 
         try:
+            logger.info(f"Connecting to Langfuse at {host or 'cloud.langfuse.com'}...")
             self._client = Langfuse(
                 public_key=public_key,
                 secret_key=secret_key,
@@ -84,14 +85,28 @@ class InferenceTracer:
                 flush_interval=flush_interval,
             )
             # Check if client is properly initialized (has keys)
-            if not self._client.auth_check():
-                logger.warning("Langfuse authentication failed. Tracing disabled.")
+            logger.info("Checking Langfuse authentication...")
+            auth_ok = self._client.auth_check()
+            if not auth_ok:
+                logger.warning(
+                    f"Langfuse authentication failed for host {host}. "
+                    "Check your LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. "
+                    "Tracing disabled."
+                )
                 self.enabled = False
                 self._client = None
             else:
-                logger.info(f"Langfuse tracing initialized (host: {host or 'default'})")
+                logger.info(
+                    f"Langfuse tracing initialized successfully "
+                    f"(host: {host or 'default'}, flush_at: {flush_at}, "
+                    f"flush_interval: {flush_interval}s)"
+                )
         except Exception as e:
-            logger.warning(f"Failed to initialize Langfuse: {e}. Tracing disabled.")
+            logger.warning(
+                f"Failed to initialize Langfuse: {e}. "
+                f"Host: {host}, Public key prefix: {public_key[:10] if public_key else 'None'}... "
+                "Tracing disabled."
+            )
             self.enabled = False
 
     def set_model_info(self, model_name: str, model_info: dict[str, Any]) -> None:
@@ -174,7 +189,7 @@ class GenerationTrace:
 
         if self._tracer.enabled and self._tracer._client:
             try:
-                # Create a generation span
+                # Create a generation span using start_generation
                 self._generation = self._tracer._client.start_generation(
                     name=self._name,
                     model=self._tracer._model_name,
@@ -186,8 +201,9 @@ class GenerationTrace:
                         "tags": self._tags,
                     },
                 )
+                logger.debug(f"Started generation trace: {self._name}")
             except Exception as e:
-                logger.debug(f"Failed to start generation trace: {e}")
+                logger.warning(f"Failed to start generation trace: {e}")
 
         return self
 
@@ -211,7 +227,8 @@ class GenerationTrace:
             try:
                 level = "ERROR" if self._metrics.error else "DEFAULT"
 
-                self._generation.end(
+                # Langfuse 3.x: update() sets data, then end() finalizes
+                self._generation.update(
                     input=self._input_data,
                     output=self._metrics.metadata.get("output"),
                     usage_details={
@@ -230,8 +247,10 @@ class GenerationTrace:
                         "cache_type": self._metrics.cache_type,
                     },
                 )
+                self._generation.end()
+                logger.debug(f"Ended generation trace: {self._name}")
             except Exception as e:
-                logger.debug(f"Failed to end generation: {e}")
+                logger.warning(f"Failed to end generation: {e}")
 
     def set_input(
         self,
