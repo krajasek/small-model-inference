@@ -304,8 +304,20 @@ def init_tracer(
     host: str | None = None,
     enabled: bool = True,
     debug: bool = False,
+    flush_at: int = 15,
+    flush_interval: float = 10.0,
 ) -> InferenceTracer:
-    """Initialize the global tracer instance."""
+    """Initialize the global tracer instance.
+
+    Args:
+        public_key: Langfuse public key
+        secret_key: Langfuse secret key
+        host: Langfuse host URL
+        enabled: Whether tracing is enabled
+        debug: Enable debug logging
+        flush_at: Number of events before flushing (lower for quicker visibility)
+        flush_interval: Seconds between flushes
+    """
     global _tracer
     _tracer = InferenceTracer(
         public_key=public_key,
@@ -313,6 +325,8 @@ def init_tracer(
         host=host,
         enabled=enabled,
         debug=debug,
+        flush_at=flush_at,
+        flush_interval=flush_interval,
     )
     return _tracer
 

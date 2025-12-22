@@ -28,8 +28,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             host=settings.langfuse_host,
             enabled=True,
             debug=settings.langfuse_debug,
+            flush_at=settings.langfuse_flush_at,
+            flush_interval=settings.langfuse_flush_interval,
         )
-        logger.info("Langfuse tracing initialized")
+        if tracer.enabled:
+            logger.info(
+                f"Langfuse tracing initialized (host: {settings.langfuse_host}, "
+                f"flush_at: {settings.langfuse_flush_at}, "
+                f"flush_interval: {settings.langfuse_flush_interval}s)"
+            )
+        else:
+            logger.warning("Langfuse tracing was requested but failed to initialize")
 
     # Create backend (handles model loading internally)
     logger.info(f"Creating {settings.backend} backend...")

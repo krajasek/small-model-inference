@@ -84,8 +84,8 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None  # Or set LANGFUSE_SECRET_KEY env var
     langfuse_host: str | None = None  # Custom host (default: cloud.langfuse.com)
     langfuse_debug: bool = False  # Enable Langfuse debug logging
-    langfuse_flush_at: int = 15  # Number of events before flushing
-    langfuse_flush_interval: float = 10.0  # Seconds between flushes
+    langfuse_flush_at: int = 1  # Events before flushing (1 = immediate, increase for production)
+    langfuse_flush_interval: float = 1.0  # Seconds between flushes (low for testing)
 
 
 def get_settings() -> Settings:

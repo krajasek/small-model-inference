@@ -34,6 +34,9 @@ class TestSettings:
         assert settings.llama_cpp_n_ctx == 2048
         assert settings.llama_cpp_n_gpu_layers == 0
         assert settings.llama_cpp_n_batch == 512
+        # Langfuse settings
+        assert settings.langfuse_flush_at == 1
+        assert settings.langfuse_flush_interval == 1.0
 
     def test_model_name_optional(self) -> None:
         """Test that model_name is optional."""
