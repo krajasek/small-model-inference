@@ -18,6 +18,7 @@ dependencies = [
     "huggingface-hub[cli]>=0.36.0",
     # Observability
     "langfuse>=2.0.0",
+    "llama-cpp-python>=0.3.16",
 ]
 
 [project.optional-dependencies]
