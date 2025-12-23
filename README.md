@@ -5,8 +5,9 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 ## Features
 
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI's `/v1/completions` and `/v1/chat/completions` endpoints
+- **WebSocket API** - Low-latency streaming with protobuf wire format for high-throughput applications
 - **Dual Backend Support** - Choose between PyTorch/HuggingFace or llama-cpp-python for inference
-- **Streaming Support** - Real-time token streaming for both completion types
+- **Streaming Support** - Real-time token streaming via HTTP SSE or WebSocket
 - **CPU Optimized** - Designed for efficient CPU inference with threading and quantization
 - **Multiple Caching Layers** - Response, prompt/KV, and tokenizer caching for faster responses
 - **Quantization** - int8 and int4 quantization support for reduced memory and faster inference
@@ -140,6 +141,7 @@ uv run python main.py
 |----------|--------|-------------|
 | `/v1/completions` | POST | Text completion (sync + streaming) |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat (sync + streaming) |
+| `/v1/stream` | WebSocket | Streaming inference with protobuf wire format |
 | `/v1/models` | GET | List loaded model info |
 | `/v1/cache/stats` | GET | Cache statistics and hit rates |
 | `/v1/cache/clear` | POST | Clear all caches |
@@ -270,6 +272,13 @@ Or use standard Langfuse environment variables:
 - `LANGFUSE_PUBLIC_KEY`
 - `LANGFUSE_SECRET_KEY`
 - `LANGFUSE_HOST`
+
+### WebSocket Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_WEBSOCKET_ENABLED` | `true` | Enable WebSocket endpoint |
+| `INFERENCE_WEBSOCKET_MAX_CONNECTIONS` | `100` | Max concurrent WebSocket connections |
 
 ---
 
@@ -541,6 +550,114 @@ with httpx.stream(
             chunk = json.loads(line[6:])
             content = chunk["choices"][0]["delta"].get("content", "")
             print(content, end="", flush=True)
+```
+
+### WebSocket with Protobuf
+
+The WebSocket API provides low-latency streaming with binary protobuf wire format. It's ideal for high-throughput applications and native clients.
+
+```python
+import asyncio
+import websockets
+import betterproto
+from inference.proto import (
+    ClientMessage,
+    CompletionRequest,
+    GenerationParams,
+    ServerMessage,
+)
+
+async def stream_completion():
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        # Create request
+        request = ClientMessage(
+            request_id="req-001",
+            completion=CompletionRequest(
+                prompt="The capital of France is",
+                params=GenerationParams(
+                    max_tokens=50,
+                    temperature=0.7,
+                ),
+            ),
+        )
+
+        # Send binary protobuf
+        await websocket.send(bytes(request))
+
+        # Receive streaming responses
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+            elif payload_type == "complete":
+                print(f"\n[Done - {msg.complete.usage.total_tokens} tokens]")
+                break
+            elif payload_type == "error":
+                print(f"Error: {msg.error.message}")
+                break
+
+asyncio.run(stream_completion())
+```
+
+### WebSocket Chat Completion
+
+```python
+import asyncio
+import websockets
+import betterproto
+from inference.proto import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ClientMessage,
+    GenerationParams,
+    ServerMessage,
+)
+
+async def stream_chat():
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        request = ClientMessage(
+            request_id="chat-001",
+            chat_completion=ChatCompletionRequest(
+                messages=[
+                    ChatMessage(role="system", content="You are a helpful assistant."),
+                    ChatMessage(role="user", content="What is Python?"),
+                ],
+                params=GenerationParams(max_tokens=150, temperature=0.7),
+            ),
+        )
+
+        await websocket.send(bytes(request))
+
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                if msg.chunk.choice.delta.role:
+                    print(f"[{msg.chunk.choice.delta.role}]: ", end="")
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+            elif payload_type == "complete":
+                print("\n[Done]")
+                break
+            elif payload_type == "error":
+                print(f"Error: {msg.error.message}")
+                break
+
+asyncio.run(stream_chat())
 ```
 
 ---

@@ -50,9 +50,13 @@ src/inference/
 ├── app.py              # FastAPI application factory with lifespan
 ├── config.py           # Pydantic Settings configuration
 ├── api/
-│   ├── routes.py       # API endpoints (/v1/completions, /v1/chat/completions)
+│   ├── routes.py       # REST API endpoints (/v1/completions, /v1/chat/completions)
+│   ├── websocket.py    # WebSocket endpoint (/v1/stream) with protobuf
 │   ├── schemas.py      # OpenAI-compatible request/response schemas
 │   └── dependencies.py # FastAPI dependency injection
+├── proto/              # Protocol buffer definitions
+│   ├── inference.proto # Protobuf schema for WebSocket API
+│   └── inference/      # Generated betterproto dataclasses
 ├── backends/           # Pluggable inference backends
 │   ├── base.py         # InferenceBackend protocol and GenerationConfig
 │   ├── pytorch.py      # PyTorch/HuggingFace backend
@@ -92,6 +96,7 @@ INFERENCE_BACKEND=llama-cpp INFERENCE_MODEL_PATH=/path/to/model.gguf uv run pyth
 |----------|--------|-------------|
 | `/v1/completions` | POST | Text completion (sync + streaming) |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat (sync + streaming) |
+| `/v1/stream` | WebSocket | Streaming inference with protobuf wire format |
 | `/v1/models` | GET | List loaded model info |
 | `/v1/cache/stats` | GET | Cache statistics and hit rates |
 | `/v1/cache/clear` | POST | Clear all caches |
@@ -134,6 +139,12 @@ INFERENCE_BACKEND=llama-cpp INFERENCE_MODEL_PATH=/path/to/model.gguf uv run pyth
 | `INFERENCE_ENABLE_SPECULATIVE_DECODING` | `false` | Use draft model |
 | `INFERENCE_DRAFT_MODEL_PATH` | | Path to draft model |
 
+### WebSocket Settings
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_WEBSOCKET_ENABLED` | `true` | Enable WebSocket endpoint |
+| `INFERENCE_WEBSOCKET_MAX_CONNECTIONS` | `100` | Max concurrent WebSocket connections |
+
 ### Observability (Langfuse)
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -146,7 +157,8 @@ INFERENCE_BACKEND=llama-cpp INFERENCE_MODEL_PATH=/path/to/model.gguf uv run pyth
 
 - PyTorch 2.2.2 (pinned for older Intel CPU support)
 - transformers, accelerate for model loading
-- FastAPI, uvicorn for REST API
+- FastAPI, uvicorn for REST API and WebSocket
+- betterproto for protobuf serialization (WebSocket API)
 - langfuse for observability and tracing
 - llama-cpp-python (optional) for GGUF model support
 

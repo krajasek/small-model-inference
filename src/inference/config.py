@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     draft_model_path: str | None = None  # Path to smaller draft model
     num_speculative_tokens: int = 4  # Tokens to speculate per step
 
+    # WebSocket settings
+    websocket_enabled: bool = True  # Enable WebSocket endpoint
+    websocket_max_connections: int = 100  # Max concurrent WebSocket connections
+
     # Observability settings (Langfuse)
     enable_tracing: bool = False  # Enable Langfuse tracing
     langfuse_public_key: str | None = None  # Or set LANGFUSE_PUBLIC_KEY env var

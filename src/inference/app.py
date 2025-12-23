@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .api.routes import router
+from .api.websocket import ws_router
 from .backends import create_backend
 from .config import Settings
 from .observability.tracing import InferenceTracer, init_tracer
@@ -105,5 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Include API routes
     app.include_router(router)
+
+    # Include WebSocket routes
+    app.include_router(ws_router)
 
     return app

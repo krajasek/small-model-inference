@@ -231,6 +231,234 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ---
 
+## WebSocket API (Protobuf)
+
+The server supports WebSocket connections for streaming inference with protobuf wire format. This provides lower latency than HTTP SSE and efficient binary serialization.
+
+### Endpoint
+
+- **URL**: `ws://localhost:8000/v1/stream`
+- **Protocol**: Binary protobuf messages
+- **Mode**: Streaming only (use REST API for non-streaming)
+
+### Proto Schema
+
+The protobuf schema is defined in `src/inference/proto/inference.proto`. Key message types:
+
+```protobuf
+// Client sends this
+message ClientMessage {
+    string request_id = 1;  // For correlating responses
+    oneof payload {
+        CompletionRequest completion = 2;
+        ChatCompletionRequest chat_completion = 3;
+    }
+}
+
+// Server responds with stream of these
+message ServerMessage {
+    string request_id = 1;  // Echoed from request
+    oneof payload {
+        StreamChunk chunk = 2;      // Token chunks
+        StreamComplete complete = 3; // Final message
+        ErrorResponse error = 4;     // Error response
+    }
+}
+```
+
+### Python Example
+
+```python
+import asyncio
+import websockets
+from inference.proto import (
+    ClientMessage,
+    CompletionRequest,
+    GenerationParams,
+    ServerMessage,
+)
+import betterproto
+
+async def stream_completion():
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        # Create request
+        request = ClientMessage(
+            request_id="req-001",
+            completion=CompletionRequest(
+                prompt="The capital of France is",
+                params=GenerationParams(
+                    max_tokens=50,
+                    temperature=0.7,
+                ),
+            ),
+        )
+
+        # Send binary protobuf
+        await websocket.send(bytes(request))
+
+        # Receive streaming responses
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            # Check which payload type using betterproto
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+            elif payload_type == "complete":
+                print(f"\n[Done - {msg.complete.usage.total_tokens} tokens]")
+                break
+            elif payload_type == "error":
+                print(f"Error: {msg.error.message}")
+                break
+
+        print()
+
+asyncio.run(stream_completion())
+```
+
+### Chat Completion Example
+
+```python
+import asyncio
+import websockets
+from inference.proto import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ClientMessage,
+    GenerationParams,
+    ServerMessage,
+)
+import betterproto
+
+async def stream_chat():
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        # Create chat request
+        request = ClientMessage(
+            request_id="chat-001",
+            chat_completion=ChatCompletionRequest(
+                messages=[
+                    ChatMessage(role="system", content="You are a helpful assistant."),
+                    ChatMessage(role="user", content="What is Python?"),
+                ],
+                params=GenerationParams(
+                    max_tokens=150,
+                    temperature=0.7,
+                ),
+            ),
+        )
+
+        # Send binary protobuf
+        await websocket.send(bytes(request))
+
+        # Receive streaming responses
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                # First chunk has role, subsequent have content
+                if msg.chunk.choice.delta.role:
+                    print(f"[{msg.chunk.choice.delta.role}]: ", end="")
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+            elif payload_type == "complete":
+                print(f"\n[Done]")
+                break
+            elif payload_type == "error":
+                print(f"Error: {msg.error.message}")
+                break
+
+asyncio.run(stream_chat())
+```
+
+### Multiple Requests (Connection Reuse)
+
+WebSocket connections can be reused for multiple sequential requests:
+
+```python
+import asyncio
+import websockets
+from inference.proto import (
+    ClientMessage,
+    CompletionRequest,
+    GenerationParams,
+    ServerMessage,
+)
+import betterproto
+
+async def multi_request():
+    uri = "ws://localhost:8000/v1/stream"
+
+    prompts = [
+        "The sky is",
+        "Water is",
+        "Fire is",
+    ]
+
+    async with websockets.connect(uri) as websocket:
+        for i, prompt in enumerate(prompts):
+            request = ClientMessage(
+                request_id=f"req-{i}",
+                completion=CompletionRequest(
+                    prompt=prompt,
+                    params=GenerationParams(max_tokens=20),
+                ),
+            )
+
+            await websocket.send(bytes(request))
+
+            print(f"Prompt: {prompt}")
+            print("Response: ", end="")
+
+            while True:
+                data = await websocket.recv()
+                msg = ServerMessage().parse(data)
+                payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+                if payload_type == "chunk" and msg.chunk.choice.delta.content:
+                    print(msg.chunk.choice.delta.content, end="", flush=True)
+                elif payload_type == "complete":
+                    print("\n")
+                    break
+                elif payload_type == "error":
+                    print(f"Error: {msg.error.message}\n")
+                    break
+
+asyncio.run(multi_request())
+```
+
+### Response Message Types
+
+| Message Type | Description |
+|--------------|-------------|
+| `StreamChunk` | Token chunk with `delta.content` (text) or `delta.role` (first chat chunk) |
+| `StreamComplete` | Final message with `usage` stats (prompt_tokens, completion_tokens, total_tokens) |
+| `ErrorResponse` | Error with `code` (400/500), `message`, and `type` |
+
+### WebSocket vs REST SSE
+
+| Feature | WebSocket (Protobuf) | REST (SSE) |
+|---------|---------------------|------------|
+| Wire format | Binary protobuf | JSON text |
+| Connection | Persistent, bidirectional | New per request |
+| Multiple requests | Reuse connection | New connection each |
+| Latency | Lower (binary, no HTTP overhead) | Higher |
+| Browser support | Requires protobuf library | Native EventSource |
+| Best for | High-throughput apps, native clients | Web apps, simple integrations |
+
+---
+
 ## Request Parameters
 
 | Parameter | Type | Default | Description |

@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package inference;
+
+// =============================================================================
+// Shared Types
+// =============================================================================
+
+message ChatMessage {
+    string role = 1;    // "system", "user", or "assistant"
+    string content = 2;
+}
+
+message GenerationParams {
+    int32 max_tokens = 1;           // default: 256
+    float temperature = 2;          // default: 0.7
+    float top_p = 3;                // default: 0.9
+    int32 top_k = 4;                // default: 50
+    bool do_sample = 5;             // default: true
+    float repetition_penalty = 6;   // default: 1.1
+    optional string user = 7;       // optional user ID for tracing
+}
+
+message Usage {
+    int32 prompt_tokens = 1;
+    int32 completion_tokens = 2;
+    int32 total_tokens = 3;
+}
+
+// =============================================================================
+// Request Messages (Client -> Server)
+// =============================================================================
+
+// Wrapper for all client requests
+message ClientMessage {
+    string request_id = 1;  // Client-provided ID to correlate responses
+    oneof payload {
+        CompletionRequest completion = 2;
+        ChatCompletionRequest chat_completion = 3;
+    }
+}
+
+message CompletionRequest {
+    string prompt = 1;
+    GenerationParams params = 2;
+}
+
+message ChatCompletionRequest {
+    repeated ChatMessage messages = 1;
+    GenerationParams params = 2;
+}
+
+// =============================================================================
+// Response Messages (Server -> Client)
+// =============================================================================
+
+// Wrapper for all server responses
+message ServerMessage {
+    string request_id = 1;  // Echoed from ClientMessage for correlation
+    oneof payload {
+        StreamChunk chunk = 2;
+        StreamComplete complete = 3;
+        ErrorResponse error = 4;
+    }
+}
+
+// Streaming token chunk (sent for each generated token)
+message StreamChunk {
+    string id = 1;              // Response ID (e.g., "cmpl-abc123")
+    int64 created = 2;          // Unix timestamp
+    string model = 3;           // Model name
+    ChunkChoice choice = 4;     // The generated content
+}
+
+message ChunkChoice {
+    int32 index = 1;
+    ChunkDelta delta = 2;
+    optional string finish_reason = 3;  // null until complete, then "stop" or "length"
+}
+
+message ChunkDelta {
+    optional string role = 1;     // Only set on first chunk for chat
+    optional string content = 2;  // Token text
+}
+
+// Final message when generation completes
+message StreamComplete {
+    string id = 1;
+    int64 created = 2;
+    string model = 3;
+    Usage usage = 4;
+}
+
+// Error response
+message ErrorResponse {
+    int32 code = 1;         // HTTP-like error code (400, 500, etc.)
+    string message = 2;     // Human-readable error message
+    optional string type = 3;  // Error type (e.g., "validation_error", "internal_error")
+}
