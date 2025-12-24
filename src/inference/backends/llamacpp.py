@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..engine.cache import ResponseCache
 from ..observability.tracing import GenerationTrace, InferenceTracer
 from .base import GenerationConfig
 
@@ -89,6 +90,14 @@ class LlamaCppBackend:
         # Determine device string for reporting
         self._device = "cuda" if settings.llama_cpp_n_gpu_layers > 0 else "cpu"
 
+        # Initialize response cache if enabled
+        self._response_cache: ResponseCache | None = None
+        if settings.enable_response_cache:
+            self._response_cache = ResponseCache(
+                max_size=settings.response_cache_size,
+                ttl_seconds=settings.response_cache_ttl,
+            )
+
         # Set model info on tracer
         if self._tracer:
             self._tracer.set_model_info(self._model_name, self.get_model_info())
@@ -97,7 +106,8 @@ class LlamaCppBackend:
             f"LlamaCppBackend initialized: model={self._model_name}, "
             f"n_ctx={settings.llama_cpp_n_ctx}, "
             f"n_threads={settings.num_threads}, "
-            f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}"
+            f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}, "
+            f"response_cache={settings.enable_response_cache}"
         )
 
     @property
@@ -132,7 +142,7 @@ class LlamaCppBackend:
         user_id: str | None = None,
         session_id: str | None = None,
     ) -> tuple[str, dict[str, int]]:
-        """Generate text completion synchronously.
+        """Generate text completion synchronously with response caching.
 
         Returns:
             Tuple of (generated_text, usage_stats)
@@ -152,6 +162,23 @@ class LlamaCppBackend:
             )
 
         try:
+            # Check response cache first
+            if self._response_cache:
+                cached = self._response_cache.get(
+                    prompt=prompt,
+                    max_new_tokens=config.max_new_tokens,
+                    temperature=config.temperature,
+                    top_p=config.top_p,
+                    top_k=config.top_k,
+                )
+                if cached:
+                    logger.debug("Returning cached response")
+                    if trace:
+                        trace.record_cache_hit("response")
+                        trace.set_output(text=cached[0], usage=cached[1])
+                        trace.__exit__(None, None, None)
+                    return cached
+
             # Generate with llama-cpp
             output = self._model(
                 prompt,
@@ -173,6 +200,18 @@ class LlamaCppBackend:
 
             # Prepend prompt to match PyTorch backend behavior
             full_text = prompt + generated_text
+
+            # Cache the response
+            if self._response_cache:
+                self._response_cache.put(
+                    prompt=prompt,
+                    max_new_tokens=config.max_new_tokens,
+                    temperature=config.temperature,
+                    top_p=config.top_p,
+                    top_k=config.top_k,
+                    response=full_text,
+                    usage=usage,
+                )
 
             if trace:
                 trace.set_output(text=full_text, usage=usage)
@@ -289,22 +328,24 @@ class LlamaCppBackend:
         }
 
     def get_cache_stats(self) -> dict[str, Any]:
-        """Get cache statistics.
-
-        Note: llama-cpp manages its own KV cache internally.
-        """
-        return {
+        """Get cache statistics."""
+        stats: dict[str, Any] = {
             "backend": "llama-cpp",
             "note": "llama-cpp manages KV cache internally",
         }
 
-    def clear_caches(self) -> None:
-        """Clear caches.
+        if self._response_cache:
+            stats["response_cache"] = self._response_cache.stats()
 
-        Note: llama-cpp manages its own KV cache internally.
-        Resetting requires model reload.
-        """
-        logger.debug("llama-cpp manages caches internally")
+        return stats
+
+    def clear_caches(self) -> None:
+        """Clear response cache."""
+        if self._response_cache:
+            self._response_cache.clear()
+            logger.info("Response cache cleared")
+        else:
+            logger.debug("No caches to clear (llama-cpp manages KV cache internally)")
 
     def shutdown(self) -> None:
         """Shutdown the backend and release resources."""
