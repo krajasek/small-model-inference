@@ -414,3 +414,129 @@ class TestWebSocketMultipleRequests:
                 if has_complete(msg):
                     assert msg.request_id == "req-2"
                     break
+
+
+class TestWebSocketCaching:
+    """Test WebSocket caching functionality."""
+
+    def test_formatted_prompt_cache(self) -> None:
+        """Test that formatted prompts are cached."""
+        from inference.api.websocket import (
+            FormattedPromptCache,
+            _format_chat_prompt,
+            get_cache_manager,
+        )
+        from inference.proto import ChatMessage
+
+        # Clear cache and reset counters
+        cache_manager = get_cache_manager()
+        cache_manager.clear_all()
+        # Reset hit/miss counters
+        cache_manager.formatted_prompt_cache._hits = 0
+        cache_manager.formatted_prompt_cache._misses = 0
+        cache_manager.system_prompt_cache._hits = 0
+        cache_manager.system_prompt_cache._misses = 0
+
+        messages = [
+            ChatMessage(role="system", content="You are helpful."),
+            ChatMessage(role="user", content="Hello!"),
+        ]
+
+        # First call should miss cache
+        prompt1 = _format_chat_prompt(messages)
+        stats1 = cache_manager.formatted_prompt_cache.stats()
+        assert stats1["misses"] == 1
+        assert stats1["hits"] == 0
+
+        # Second call with same messages should hit cache
+        prompt2 = _format_chat_prompt(messages)
+        stats2 = cache_manager.formatted_prompt_cache.stats()
+        assert stats2["hits"] == 1
+        assert prompt1 == prompt2
+
+    def test_system_prompt_cache(self) -> None:
+        """Test that system prompts are cached separately."""
+        from inference.api.websocket import (
+            _format_chat_prompt,
+            get_cache_manager,
+        )
+        from inference.proto import ChatMessage
+
+        # Clear cache and reset counters
+        cache_manager = get_cache_manager()
+        cache_manager.clear_all()
+        cache_manager.formatted_prompt_cache._hits = 0
+        cache_manager.formatted_prompt_cache._misses = 0
+        cache_manager.system_prompt_cache._hits = 0
+        cache_manager.system_prompt_cache._misses = 0
+
+        system_content = "You are a helpful assistant."
+
+        # First request with system prompt
+        messages1 = [
+            ChatMessage(role="system", content=system_content),
+            ChatMessage(role="user", content="Hello!"),
+        ]
+        _format_chat_prompt(messages1)
+
+        # Check system prompt was cached
+        sys_stats1 = cache_manager.system_prompt_cache.stats()
+        assert sys_stats1["size"] == 1
+
+        # Second request with same system but different user message
+        # (will miss formatted prompt cache but hit system prompt cache)
+        messages2 = [
+            ChatMessage(role="system", content=system_content),
+            ChatMessage(role="user", content="Different message!"),
+        ]
+        _format_chat_prompt(messages2)
+
+        sys_stats2 = cache_manager.system_prompt_cache.stats()
+        assert sys_stats2["hits"] >= 1  # System prompt was reused
+
+    def test_cache_stats_and_clear(self) -> None:
+        """Test cache statistics and clearing."""
+        from inference.api.websocket import (
+            clear_websocket_caches,
+            get_cache_manager,
+            get_websocket_cache_stats,
+        )
+
+        cache_manager = get_cache_manager()
+
+        # Get stats
+        stats = get_websocket_cache_stats()
+        assert "formatted_prompt_cache" in stats
+        assert "system_prompt_cache" in stats
+        assert "size" in stats["formatted_prompt_cache"]
+        assert "hit_rate" in stats["formatted_prompt_cache"]
+
+        # Clear caches
+        clear_websocket_caches()
+        stats_after = get_websocket_cache_stats()
+        assert stats_after["formatted_prompt_cache"]["size"] == 0
+        assert stats_after["system_prompt_cache"]["size"] == 0
+
+    def test_formatted_prompt_cache_lru_eviction(self) -> None:
+        """Test that LRU eviction works."""
+        from inference.api.websocket import FormattedPromptCache
+        from inference.proto import ChatMessage
+
+        cache = FormattedPromptCache(max_size=3)
+
+        # Add 4 items (exceeds max_size of 3)
+        for i in range(4):
+            messages = [ChatMessage(role="user", content=f"Message {i}")]
+            cache.put(messages, f"formatted_{i}")
+
+        # Cache should have 3 items (oldest was evicted)
+        assert cache.stats()["size"] == 3
+
+        # First message should be evicted
+        messages_0 = [ChatMessage(role="user", content="Message 0")]
+        assert cache.get(messages_0) is None
+
+        # Last 3 messages should still be cached
+        for i in range(1, 4):
+            messages = [ChatMessage(role="user", content=f"Message {i}")]
+            assert cache.get(messages) == f"formatted_{i}"

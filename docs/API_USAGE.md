@@ -457,6 +457,21 @@ asyncio.run(multi_request())
 | Browser support | Requires protobuf library | Native EventSource |
 | Best for | High-throughput apps, native clients | Web apps, simple integrations |
 
+### WebSocket Caching
+
+The WebSocket endpoint includes its own caching layers for improved performance:
+
+| Cache Type | Description | Benefit |
+|------------|-------------|---------|
+| Formatted Prompt Cache | Caches the result of formatting chat messages into prompt strings | Avoids repeated string formatting for identical message sequences |
+| System Prompt Cache | Caches formatted system prompts separately | Reuses formatted system prompts across different user messages |
+
+These caches are particularly useful for chat applications where:
+- The same system prompt is used across many requests
+- Users send similar or identical message sequences
+
+WebSocket cache statistics are included in the `/v1/cache/stats` endpoint response under `websocket_caches`.
+
 ---
 
 ## Request Parameters

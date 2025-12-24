@@ -229,8 +229,11 @@ def _stream_chat_completion(
 @router.get("/v1/cache/stats")
 async def get_cache_stats(engine: EngineDep) -> dict:
     """Get cache statistics for monitoring."""
+    from .websocket import get_websocket_cache_stats
+
     return {
         "caches": engine.get_cache_stats(),
+        "websocket_caches": get_websocket_cache_stats(),
         "model_info": engine.get_model_info(),
     }
 
@@ -238,7 +241,10 @@ async def get_cache_stats(engine: EngineDep) -> dict:
 @router.post("/v1/cache/clear")
 async def clear_caches(engine: EngineDep) -> dict:
     """Clear all inference caches."""
+    from .websocket import clear_websocket_caches
+
     engine.clear_caches()
+    clear_websocket_caches()
     return {"status": "ok", "message": "All caches cleared"}
 
 
