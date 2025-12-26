@@ -24,10 +24,11 @@ import uuid
 from dataclasses import dataclass, field
 
 try:
+    import betterproto
     import websockets
     from websockets.asyncio.client import connect
 except ImportError:
-    print("Error: websockets library required. Install with: uv add websockets")
+    print("Error: websockets and betterproto libraries required.")
     sys.exit(1)
 
 # Import protobuf definitions
@@ -168,16 +169,16 @@ class ChatClient:
 
                 # Parse server message
                 server_msg = ServerMessage().parse(data)
+                payload_type, _ = betterproto.which_one_of(server_msg, "payload")
 
-                # Check for error
-                if server_msg.error and server_msg.error.message:
+                # Handle based on payload type
+                if payload_type == "error":
                     print(f"\nServer error: {server_msg.error.message}")
                     # Remove the user message we just added
                     self.session.messages.pop()
                     return None
 
-                # Handle stream chunk
-                if server_msg.chunk and server_msg.chunk.choice:
+                elif payload_type == "chunk":
                     chunk = server_msg.chunk
                     delta = chunk.choice.delta
 
@@ -194,8 +195,7 @@ class ChatClient:
                     if chunk.choice.finish_reason:
                         break
 
-                # Handle stream complete
-                if server_msg.complete:
+                elif payload_type == "complete":
                     self.session.total_tokens += server_msg.complete.usage.total_tokens
                     break
 
