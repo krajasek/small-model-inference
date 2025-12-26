@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """CLI client for the inference server using WebSocket streaming.
 
-Provides an interactive chat interface with low time-to-first-token latency.
+A beautiful TUI for interactive chat with low time-to-first-token latency.
 
 Usage:
-    uv run python -m inference.cli [OPTIONS]
+    uv run inference-cli [OPTIONS]
 
 Options:
     --host HOST         Server host (default: localhost)
@@ -31,6 +31,19 @@ except ImportError:
     print("Error: websockets and betterproto libraries required.")
     sys.exit(1)
 
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.spinner import Spinner
+    from rich.table import Table
+    from rich.text import Text
+    from rich.theme import Theme
+except ImportError:
+    print("Error: rich library required. Install with: uv add rich")
+    sys.exit(1)
+
 # Import protobuf definitions
 try:
     from .proto import (
@@ -50,6 +63,23 @@ except ImportError:
         GenerationParams,
         ServerMessage,
     )
+
+# Custom theme for the TUI
+THEME = Theme(
+    {
+        "info": "dim cyan",
+        "warning": "yellow",
+        "error": "bold red",
+        "success": "bold green",
+        "user": "bold blue",
+        "assistant": "bold magenta",
+        "system": "dim italic",
+        "stats": "dim",
+        "command": "bold yellow",
+    }
+)
+
+console = Console(theme=THEME)
 
 
 @dataclass
@@ -72,6 +102,7 @@ class ChatSession:
     config: ChatConfig
     messages: list[ChatMessage] = field(default_factory=list)
     total_tokens: int = 0
+    request_count: int = 0
 
     @property
     def websocket_url(self) -> str:
@@ -92,6 +123,7 @@ class ChatSession:
 
     def build_request(self) -> ClientMessage:
         """Build a ClientMessage for the current conversation."""
+        self.request_count += 1
         return ClientMessage(
             request_id=uuid.uuid4().hex[:8],
             chat_completion=ChatCompletionRequest(
@@ -110,6 +142,7 @@ class ChatSession:
         """Clear conversation history."""
         self.messages = []
         self.total_tokens = 0
+        self.request_count = 0
         self.add_system_prompt()
 
 
@@ -133,7 +166,7 @@ class ChatClient:
             )
             return True
         except Exception as e:
-            print(f"\nError connecting to server: {e}")
+            console.print(f"[error]Connection failed:[/error] {e}")
             return False
 
     async def disconnect(self) -> None:
@@ -145,22 +178,20 @@ class ChatClient:
     async def _ensure_connected(self) -> bool:
         """Ensure WebSocket connection is open, reconnecting if needed."""
         if self._ws is None:
-            print("Reconnecting... ", end="", flush=True)
-            if await self.connect():
-                print("OK")
-                return True
+            with console.status("[info]Reconnecting...[/info]", spinner="dots"):
+                if await self.connect():
+                    console.print("[success]Reconnected[/success]")
+                    return True
             return False
 
         # Check if connection is still open
         try:
-            # Use the connection state to check if it's open
             if self._ws.close_code is not None:
-                # Connection was closed, reconnect
                 self._ws = None
-                print("Reconnecting... ", end="", flush=True)
-                if await self.connect():
-                    print("OK")
-                    return True
+                with console.status("[info]Reconnecting...[/info]", spinner="dots"):
+                    if await self.connect():
+                        console.print("[success]Reconnected[/success]")
+                        return True
                 return False
         except Exception:
             self._ws = None
@@ -168,14 +199,16 @@ class ChatClient:
 
         return True
 
-    async def send_message(self, user_input: str) -> str | None:
+    async def send_message(self, user_input: str) -> tuple[str | None, dict]:
         """Send a message and stream the response.
 
-        Returns the complete assistant response or None on error.
+        Returns tuple of (response_text, timing_stats) or (None, {}) on error.
         """
+        stats: dict = {}
+
         if not await self._ensure_connected():
-            print("\nFailed to connect to server")
-            return None
+            console.print("[error]Failed to connect to server[/error]")
+            return None, stats
 
         # Add user message to history
         self.session.add_user_message(user_input)
@@ -185,105 +218,216 @@ class ChatClient:
         try:
             await self._ws.send(bytes(request))
         except websockets.exceptions.ConnectionClosed:
-            # Connection closed while sending, try to reconnect and resend
             self._ws = None
             if not await self._ensure_connected():
-                print("\nFailed to reconnect")
+                console.print("[error]Failed to reconnect[/error]")
                 self.session.messages.pop()
-                return None
+                return None, stats
             await self._ws.send(bytes(request))
 
         # Stream and collect response
         response_text = ""
         first_token_time: float | None = None
         start_time = time.perf_counter()
+        token_count = 0
+
+        # Show spinner while waiting for first token
+        spinner = Spinner("dots", text="Thinking...", style="info")
 
         try:
-            while True:
-                data = await self._ws.recv()
-                if isinstance(data, str):
-                    continue  # Skip text frames
+            with Live(spinner, console=console, refresh_per_second=10, transient=True):
+                while True:
+                    data = await self._ws.recv()
+                    if isinstance(data, str):
+                        continue
 
-                # Parse server message
-                server_msg = ServerMessage().parse(data)
-                payload_type, _ = betterproto.which_one_of(server_msg, "payload")
+                    server_msg = ServerMessage().parse(data)
+                    payload_type, _ = betterproto.which_one_of(server_msg, "payload")
 
-                # Handle based on payload type
-                if payload_type == "error":
-                    print(f"\nServer error: {server_msg.error.message}")
-                    # Remove the user message we just added
-                    self.session.messages.pop()
-                    return None
+                    if payload_type == "error":
+                        console.print(f"[error]Server error:[/error] {server_msg.error.message}")
+                        self.session.messages.pop()
+                        return None, stats
 
-                elif payload_type == "chunk":
-                    chunk = server_msg.chunk
-                    delta = chunk.choice.delta
+                    elif payload_type == "chunk":
+                        chunk = server_msg.chunk
+                        delta = chunk.choice.delta
 
-                    # Track time to first token
-                    if delta.content and first_token_time is None:
-                        first_token_time = time.perf_counter()
+                        if delta.content and first_token_time is None:
+                            first_token_time = time.perf_counter()
+                            # Exit the Live context to start printing tokens
+                            break
 
-                    # Print token
-                    if delta.content:
-                        print(delta.content, end="", flush=True)
-                        response_text += delta.content
+                    elif payload_type == "complete":
+                        self.session.total_tokens += server_msg.complete.usage.total_tokens
+                        break
 
-                    # Note: Don't break on finish_reason - wait for complete message
+            # Continue streaming tokens outside the spinner
+            if first_token_time is not None:
+                # Print the first token we already received
+                if delta.content:
+                    console.print(delta.content, end="")
+                    response_text += delta.content
+                    token_count += 1
 
-                elif payload_type == "complete":
-                    # This is the final message - safe to break now
-                    self.session.total_tokens += server_msg.complete.usage.total_tokens
-                    break
+                # Continue receiving remaining tokens
+                while True:
+                    data = await self._ws.recv()
+                    if isinstance(data, str):
+                        continue
+
+                    server_msg = ServerMessage().parse(data)
+                    payload_type, _ = betterproto.which_one_of(server_msg, "payload")
+
+                    if payload_type == "chunk":
+                        chunk = server_msg.chunk
+                        delta = chunk.choice.delta
+
+                        if delta.content:
+                            console.print(delta.content, end="")
+                            response_text += delta.content
+                            token_count += 1
+
+                    elif payload_type == "complete":
+                        self.session.total_tokens += server_msg.complete.usage.total_tokens
+                        break
 
         except websockets.exceptions.ConnectionClosed:
-            print("\n[Connection lost - will reconnect on next message]")
+            console.print("\n[warning]Connection lost - will reconnect on next message[/warning]")
             self._ws = None
-            # Remove the user message since response didn't complete
             self.session.messages.pop()
-            return None
+            return None, stats
         except Exception as e:
-            print(f"\nError receiving response: {e}")
-            return None
+            console.print(f"\n[error]Error:[/error] {e}")
+            return None, stats
 
-        # Print timing stats
+        console.print()  # Newline after response
+
+        # Calculate stats
         end_time = time.perf_counter()
         total_time = end_time - start_time
         ttft = first_token_time - start_time if first_token_time else 0
+        tokens_per_sec = token_count / total_time if total_time > 0 else 0
 
-        print()  # Newline after response
-        print(f"\n[TTFT: {ttft * 1000:.0f}ms | Total: {total_time:.2f}s]")
+        stats = {
+            "ttft_ms": ttft * 1000,
+            "total_s": total_time,
+            "tokens": token_count,
+            "tokens_per_sec": tokens_per_sec,
+        }
 
         # Add assistant response to history
         if response_text:
             self.session.add_assistant_message(response_text)
 
-        return response_text
+        return response_text, stats
 
 
 def print_welcome(config: ChatConfig) -> None:
-    """Print welcome message and instructions."""
-    print("=" * 60)
-    print("Inference Server CLI (WebSocket)")
-    print("=" * 60)
-    print(f"Server: ws://{config.host}:{config.port}/v1/stream")
-    print(f"Max tokens: {config.max_tokens} | Temperature: {config.temperature}")
+    """Print welcome banner."""
+    title = Text()
+    title.append("Inference CLI", style="bold magenta")
+    title.append(" ", style="dim")
+    title.append("WebSocket Streaming", style="dim cyan")
+
+    # Connection info
+    info_table = Table.grid(padding=(0, 2))
+    info_table.add_column(style="dim")
+    info_table.add_column()
+    info_table.add_row("Server", f"ws://{config.host}:{config.port}/v1/stream")
+    info_table.add_row("Max tokens", str(config.max_tokens))
+    info_table.add_row("Temperature", str(config.temperature))
     if config.system_prompt:
-        print(f"System: {config.system_prompt[:50]}...")
-    print("-" * 60)
-    print("Commands:")
-    print("  /clear  - Clear conversation history")
-    print("  /stats  - Show session statistics")
-    print("  /quit   - Exit the chat")
-    print("=" * 60)
-    print()
+        prompt_display = (
+            config.system_prompt[:40] + "..."
+            if len(config.system_prompt) > 40
+            else config.system_prompt
+        )
+        info_table.add_row("System", f'"{prompt_display}"')
+
+    panel = Panel(
+        info_table,
+        title=title,
+        border_style="blue",
+        padding=(0, 1),
+    )
+    console.print(panel)
+
+    # Commands help
+    commands = Text()
+    commands.append("/clear", style="command")
+    commands.append(" clear history  ", style="dim")
+    commands.append("/stats", style="command")
+    commands.append(" show stats  ", style="dim")
+    commands.append("/help", style="command")
+    commands.append(" commands  ", style="dim")
+    commands.append("/quit", style="command")
+    commands.append(" exit", style="dim")
+    console.print(commands)
+    console.print()
 
 
 def print_stats(session: ChatSession) -> None:
-    """Print session statistics."""
-    print("\n--- Session Stats ---")
-    print(f"Messages: {len(session.messages)}")
-    print(f"Total tokens: {session.total_tokens}")
-    print()
+    """Print session statistics in a nice table."""
+    table = Table(title="Session Statistics", border_style="dim")
+    table.add_column("Metric", style="dim")
+    table.add_column("Value", justify="right")
+
+    user_msgs = sum(1 for m in session.messages if m.role == "user")
+    assistant_msgs = sum(1 for m in session.messages if m.role == "assistant")
+
+    table.add_row("Total messages", str(len(session.messages)))
+    table.add_row("User messages", str(user_msgs))
+    table.add_row("Assistant messages", str(assistant_msgs))
+    table.add_row("Requests made", str(session.request_count))
+    table.add_row("Total tokens", str(session.total_tokens))
+
+    console.print(table)
+    console.print()
+
+
+def print_help() -> None:
+    """Print help message."""
+    table = Table(title="Commands", border_style="dim", show_header=False)
+    table.add_column("Command", style="command")
+    table.add_column("Description")
+
+    table.add_row("/clear", "Clear conversation history")
+    table.add_row("/stats", "Show session statistics")
+    table.add_row("/help", "Show this help message")
+    table.add_row("/quit, /exit", "Exit the chat")
+    table.add_row("Ctrl+C", "Interrupt and exit")
+    table.add_row("Ctrl+D", "Exit (EOF)")
+
+    console.print(table)
+    console.print()
+
+
+def print_response_stats(stats: dict) -> None:
+    """Print response timing stats."""
+    if not stats:
+        return
+
+    stat_text = Text()
+    stat_text.append("  ", style="dim")
+    stat_text.append(f"TTFT: {stats['ttft_ms']:.0f}ms", style="stats")
+    stat_text.append("  ", style="dim")
+    stat_text.append(f"Total: {stats['total_s']:.2f}s", style="stats")
+    stat_text.append("  ", style="dim")
+    stat_text.append(f"{stats['tokens_per_sec']:.1f} tok/s", style="stats")
+    console.print(stat_text)
+
+
+def get_user_input() -> str | None:
+    """Get user input with a styled prompt."""
+    try:
+        console.print()
+        console.print("[user]You[/user] ", end="")
+        return input().strip()
+    except EOFError:
+        return None
+    except KeyboardInterrupt:
+        return None
 
 
 async def main_loop(client: ChatClient) -> None:
@@ -291,20 +435,24 @@ async def main_loop(client: ChatClient) -> None:
     print_welcome(client.config)
 
     # Connect to server
-    print("Connecting to server...", end=" ", flush=True)
-    if not await client.connect():
+    with console.status("[info]Connecting to server...[/info]", spinner="dots"):
+        connected = await client.connect()
+
+    if not connected:
         return
-    print("Connected!\n")
+
+    console.print("[success]Connected![/success]")
+    console.print()
 
     # Initialize with system prompt
     client.session.add_system_prompt()
 
     try:
         while True:
-            try:
-                # Get user input
-                user_input = input("You: ").strip()
-            except EOFError:
+            user_input = get_user_input()
+
+            if user_input is None:
+                console.print("\n[dim]Goodbye![/dim]")
                 break
 
             if not user_input:
@@ -312,27 +460,41 @@ async def main_loop(client: ChatClient) -> None:
 
             # Handle commands
             if user_input.startswith("/"):
-                cmd = user_input.lower()
-                if cmd == "/quit" or cmd == "/exit":
-                    print("Goodbye!")
+                cmd = user_input.lower().split()[0]
+                if cmd in ("/quit", "/exit", "/q"):
+                    console.print("[dim]Goodbye![/dim]")
                     break
                 elif cmd == "/clear":
                     client.session.clear()
-                    print("Conversation cleared.\n")
+                    console.print("[success]Conversation cleared.[/success]")
                     continue
                 elif cmd == "/stats":
                     print_stats(client.session)
                     continue
+                elif cmd == "/help":
+                    print_help()
+                    continue
                 else:
-                    print(f"Unknown command: {user_input}")
+                    console.print(f"[warning]Unknown command:[/warning] {user_input}")
+                    console.print("[dim]Type /help for available commands[/dim]")
                     continue
 
+            # Show assistant label
+            console.print()
+            console.print("[assistant]Assistant[/assistant]")
+
             # Send message and stream response
-            print("\nAssistant: ", end="", flush=True)
-            await client.send_message(user_input)
+            response, stats = await client.send_message(user_input)
+
+            if response:
+                # Render as markdown for nice formatting
+                console.print()
+                md = Markdown(response)
+                console.print(Panel(md, border_style="dim magenta", padding=(0, 1)))
+                print_response_stats(stats)
 
     except KeyboardInterrupt:
-        print("\n\nInterrupted. Goodbye!")
+        console.print("\n\n[dim]Interrupted. Goodbye![/dim]")
     finally:
         await client.disconnect()
 
@@ -340,8 +502,15 @@ async def main_loop(client: ChatClient) -> None:
 def parse_args() -> ChatConfig:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="CLI client for the inference server using WebSocket streaming",
+        description="Interactive chat CLI for the inference server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  inference-cli
+  inference-cli --host 192.168.1.100 --port 8080
+  inference-cli -s "You are a helpful coding assistant"
+  inference-cli --max-tokens 512 --temperature 0.8
+        """,
     )
 
     parser.add_argument(

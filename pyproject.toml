@@ -22,6 +22,8 @@ dependencies = [
     # WebSocket + Protobuf
     "betterproto>=2.0.0b6",
     "websockets>=12.0",
+    # CLI TUI
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
