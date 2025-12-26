@@ -191,11 +191,10 @@ class ChatClient:
                         print(delta.content, end="", flush=True)
                         response_text += delta.content
 
-                    # Check for completion
-                    if chunk.choice.finish_reason:
-                        break
+                    # Note: Don't break on finish_reason - wait for complete message
 
                 elif payload_type == "complete":
+                    # This is the final message - safe to break now
                     self.session.total_tokens += server_msg.complete.usage.total_tokens
                     break
 
