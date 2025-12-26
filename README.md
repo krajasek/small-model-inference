@@ -27,6 +27,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - [Observability](#observability)
 - [Docker Deployment](#docker-deployment)
 - [Examples](#examples)
+- [CLI Client](#cli-client)
 
 ---
 
@@ -659,6 +660,58 @@ async def stream_chat():
 
 asyncio.run(stream_chat())
 ```
+
+---
+
+## CLI Client
+
+An interactive CLI client is included for conversational chat using the low-latency WebSocket API.
+
+### Installation
+
+The CLI is installed automatically with the package:
+
+```bash
+uv sync
+```
+
+### Usage
+
+```bash
+# Basic usage (connects to localhost:8000)
+uv run inference-cli
+
+# Or run as module
+uv run python -m inference.cli
+
+# With options
+uv run inference-cli \
+    --host 192.168.1.100 \
+    --port 8080 \
+    --system "You are a helpful coding assistant." \
+    --max-tokens 512 \
+    --temperature 0.8
+```
+
+### Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--host` | | `localhost` | Server host |
+| `--port` | | `8000` | Server port |
+| `--system` | `-s` | | System prompt for the conversation |
+| `--max-tokens` | `-m` | `256` | Maximum tokens to generate |
+| `--temperature` | `-t` | `0.7` | Sampling temperature |
+| `--top-p` | | `0.9` | Top-p sampling parameter |
+| `--top-k` | | `50` | Top-k sampling parameter |
+
+### Interactive Commands
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Clear conversation history |
+| `/stats` | Show session statistics |
+| `/quit` | Exit the chat |
 
 ---
 

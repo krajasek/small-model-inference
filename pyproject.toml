@@ -21,6 +21,7 @@ dependencies = [
     "llama-cpp-python>=0.3.16",
     # WebSocket + Protobuf
     "betterproto>=2.0.0b6",
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,9 @@ dev = [
 llama-cpp = [
     "llama-cpp-python>=0.2.0",
 ]
+
+[project.scripts]
+inference-cli = "inference.cli:main"
 
 [build-system]
 requires = ["hatchling"]
