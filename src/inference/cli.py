@@ -128,6 +128,8 @@ class ChatClient:
                 self.session.websocket_url,
                 open_timeout=10,
                 close_timeout=5,
+                # Disable ping to avoid timeout during long inference
+                ping_interval=None,
             )
             return True
         except Exception as e:
