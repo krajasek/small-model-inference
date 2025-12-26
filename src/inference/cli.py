@@ -142,13 +142,39 @@ class ChatClient:
             await self._ws.close()
             self._ws = None
 
+    async def _ensure_connected(self) -> bool:
+        """Ensure WebSocket connection is open, reconnecting if needed."""
+        if self._ws is None:
+            print("Reconnecting... ", end="", flush=True)
+            if await self.connect():
+                print("OK")
+                return True
+            return False
+
+        # Check if connection is still open
+        try:
+            # Use the connection state to check if it's open
+            if self._ws.close_code is not None:
+                # Connection was closed, reconnect
+                self._ws = None
+                print("Reconnecting... ", end="", flush=True)
+                if await self.connect():
+                    print("OK")
+                    return True
+                return False
+        except Exception:
+            self._ws = None
+            return await self._ensure_connected()
+
+        return True
+
     async def send_message(self, user_input: str) -> str | None:
         """Send a message and stream the response.
 
         Returns the complete assistant response or None on error.
         """
-        if not self._ws:
-            print("\nNot connected to server")
+        if not await self._ensure_connected():
+            print("\nFailed to connect to server")
             return None
 
         # Add user message to history
@@ -156,7 +182,16 @@ class ChatClient:
 
         # Build and send request
         request = self.session.build_request()
-        await self._ws.send(bytes(request))
+        try:
+            await self._ws.send(bytes(request))
+        except websockets.exceptions.ConnectionClosed:
+            # Connection closed while sending, try to reconnect and resend
+            self._ws = None
+            if not await self._ensure_connected():
+                print("\nFailed to reconnect")
+                self.session.messages.pop()
+                return None
+            await self._ws.send(bytes(request))
 
         # Stream and collect response
         response_text = ""
@@ -200,9 +235,11 @@ class ChatClient:
                     self.session.total_tokens += server_msg.complete.usage.total_tokens
                     break
 
-        except websockets.exceptions.ConnectionClosed as e:
-            print(f"\nConnection closed: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            print("\n[Connection lost - will reconnect on next message]")
             self._ws = None
+            # Remove the user message since response didn't complete
+            self.session.messages.pop()
             return None
         except Exception as e:
             print(f"\nError receiving response: {e}")
