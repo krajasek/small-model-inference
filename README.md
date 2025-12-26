@@ -280,6 +280,8 @@ Or use standard Langfuse environment variables:
 |----------|---------|-------------|
 | `INFERENCE_WEBSOCKET_ENABLED` | `true` | Enable WebSocket endpoint |
 | `INFERENCE_WEBSOCKET_MAX_CONNECTIONS` | `100` | Max concurrent WebSocket connections |
+| `INFERENCE_WEBSOCKET_PING_INTERVAL` | `None` | Ping interval in seconds (None = disabled) |
+| `INFERENCE_WEBSOCKET_PING_TIMEOUT` | `None` | Ping timeout in seconds (None = disabled) |
 
 ---
 

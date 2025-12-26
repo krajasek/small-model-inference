@@ -144,6 +144,8 @@ INFERENCE_BACKEND=llama-cpp INFERENCE_MODEL_PATH=/path/to/model.gguf uv run pyth
 |----------|---------|-------------|
 | `INFERENCE_WEBSOCKET_ENABLED` | `true` | Enable WebSocket endpoint |
 | `INFERENCE_WEBSOCKET_MAX_CONNECTIONS` | `100` | Max concurrent WebSocket connections |
+| `INFERENCE_WEBSOCKET_PING_INTERVAL` | `None` | Ping interval in seconds (None = disabled) |
+| `INFERENCE_WEBSOCKET_PING_TIMEOUT` | `None` | Ping timeout in seconds (None = disabled) |
 
 ### Observability (Langfuse)
 | Variable | Default | Description |

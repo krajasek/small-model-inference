@@ -16,6 +16,9 @@ def main() -> None:
         host=settings.host,
         port=settings.port,
         log_level="info",
+        # WebSocket ping settings - disabled by default for long-running inference
+        ws_ping_interval=settings.websocket_ping_interval,
+        ws_ping_timeout=settings.websocket_ping_timeout,
     )
 
 

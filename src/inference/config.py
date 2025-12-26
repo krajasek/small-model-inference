@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     # WebSocket settings
     websocket_enabled: bool = True  # Enable WebSocket endpoint
     websocket_max_connections: int = 100  # Max concurrent WebSocket connections
+    websocket_ping_interval: float | None = None  # Ping interval (None = disabled)
+    websocket_ping_timeout: float | None = None  # Ping timeout (None = disabled)
 
     # Observability settings (Langfuse)
     enable_tracing: bool = False  # Enable Langfuse tracing
