@@ -222,14 +222,38 @@ class PyTorchBackend:
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             prompt_tokens = inputs["input_ids"].shape[1]
 
+            # Check persistent KV cache for this prompt
+            cached_kv = self._get_cached_kv(prompt)
+            past_key_values = None
+
+            if cached_kv is not None:
+                logger.debug("Using cached KV states from persistent cache")
+                if trace:
+                    trace.record_cache_hit("persistent_kv")
+                _, _, key_cache, value_cache = cached_kv
+                # Convert to DynamicCache format for HuggingFace
+                from transformers import DynamicCache
+
+                past_key_values = DynamicCache()
+                for k, v in zip(key_cache, value_cache, strict=True):
+                    past_key_values.update(k, v, layer_idx=len(past_key_values))
+
             # Build generation kwargs
             generation_kwargs = self._build_generation_kwargs(inputs, config)
+
+            # Add past_key_values if we have cached KV states
+            if past_key_values is not None:
+                generation_kwargs["past_key_values"] = past_key_values
 
             # Generate with appropriate method
             if self._settings.enable_speculative_decoding and self._draft_model:
                 outputs = self._generate_with_speculation(inputs, generation_kwargs)
             else:
                 outputs = self._generate_standard(generation_kwargs)
+
+            # Cache KV states if persistent cache is enabled and we didn't have a cache hit
+            if self._persistent_cache and cached_kv is None:
+                self._compute_and_cache_kv(prompt, inputs["input_ids"], inputs["attention_mask"])
 
             # Decode output
             generated_ids = outputs[0]
@@ -361,6 +385,22 @@ class PyTorchBackend:
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             prompt_tokens = inputs["input_ids"].shape[1]
 
+            # Check persistent KV cache for this prompt
+            cached_kv = self._get_cached_kv(prompt)
+            past_key_values = None
+
+            if cached_kv is not None:
+                logger.debug("Using cached KV states from persistent cache (streaming)")
+                if trace:
+                    trace.record_cache_hit("persistent_kv")
+                _, _, key_cache, value_cache = cached_kv
+                # Convert to DynamicCache format for HuggingFace
+                from transformers import DynamicCache
+
+                past_key_values = DynamicCache()
+                for k, v in zip(key_cache, value_cache, strict=True):
+                    past_key_values.update(k, v, layer_idx=len(past_key_values))
+
             # Create streamer for token-by-token streaming
             streamer = TextIteratorStreamer(
                 self._tokenizer,
@@ -382,6 +422,14 @@ class PyTorchBackend:
                 "eos_token_id": self._tokenizer.eos_token_id,
                 "use_cache": self._settings.use_kv_cache,
             }
+
+            # Add past_key_values if we have cached KV states
+            if past_key_values is not None:
+                generation_kwargs["past_key_values"] = past_key_values
+
+            # Cache KV states if persistent cache is enabled and we didn't have a cache hit
+            if self._persistent_cache and cached_kv is None:
+                self._compute_and_cache_kv(prompt, inputs["input_ids"], inputs["attention_mask"])
 
             # Run generation in a separate thread
             thread = Thread(target=self._generate_in_thread, args=(generation_kwargs,))
