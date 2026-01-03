@@ -78,6 +78,17 @@ class Settings(BaseSettings):
     draft_model_path: str | None = None  # Path to smaller draft model
     num_speculative_tokens: int = 4  # Tokens to speculate per step
 
+    # Persistent KV cache settings
+    enable_persistent_cache: bool = False  # Enable persistent KV cache to disk
+    persistent_cache_dir: str = ".cache/kv"  # Directory for disk cache
+    persistent_cache_memory_size: int = 100  # Max entries in memory tier
+    persistent_cache_disk_size_gb: float = 10.0  # Max disk cache size (GB)
+    persistent_cache_chunk_size: int = 256  # Tokens per cache chunk
+    persistent_cache_compression: Literal["none", "zstd", "lz4"] = "zstd"
+    persistent_cache_async_writes: bool = True  # Use async disk writes
+    persistent_cache_warm_on_startup: bool = True  # Warm cache on server start
+    persistent_cache_ttl_days: int = 7  # Disk entry TTL in days
+
     # WebSocket settings
     websocket_enabled: bool = True  # Enable WebSocket endpoint
     websocket_max_connections: int = 100  # Max concurrent WebSocket connections

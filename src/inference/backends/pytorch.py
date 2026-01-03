@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -15,6 +16,7 @@ from transformers import (
 from ..config import Settings
 from ..engine.cache import CacheManager
 from ..engine.cpu_optimizer import CPUOptimizer
+from ..engine.persistent_cache import PersistentCacheManager
 from ..models.loader import ModelLoader
 from ..observability.tracing import GenerationTrace, InferenceTracer
 from .base import GenerationConfig
@@ -76,6 +78,19 @@ class PyTorchBackend:
             enable_tokenizer_cache=settings.enable_tokenizer_cache,
         )
 
+        # Initialize persistent KV cache if enabled
+        self._persistent_cache: PersistentCacheManager | None = None
+        if settings.enable_persistent_cache:
+            self._persistent_cache = PersistentCacheManager(
+                cache_dir=Path(settings.persistent_cache_dir),
+                memory_size=settings.persistent_cache_memory_size,
+                disk_size_gb=settings.persistent_cache_disk_size_gb,
+                compression=settings.persistent_cache_compression,
+                async_writes=settings.persistent_cache_async_writes,
+                ttl_days=settings.persistent_cache_ttl_days,
+                warm_on_startup=settings.persistent_cache_warm_on_startup,
+            )
+
         # Configure static KV cache if enabled
         if settings.static_kv_cache:
             self._setup_static_cache()
@@ -89,6 +104,7 @@ class PyTorchBackend:
             f"caching: response={settings.enable_response_cache}, "
             f"prompt={settings.enable_prompt_cache}, "
             f"tokenizer={settings.enable_tokenizer_cache}, "
+            f"persistent={settings.enable_persistent_cache}, "
             f"tracing={tracer is not None and tracer.enabled}"
         )
 
@@ -288,9 +304,7 @@ class PyTorchBackend:
         logger.debug("Using speculative decoding")
 
         gen_kwargs = {
-            k: v
-            for k, v in generation_kwargs.items()
-            if k not in ("input_ids", "attention_mask")
+            k: v for k, v in generation_kwargs.items() if k not in ("input_ids", "attention_mask")
         }
 
         with torch.inference_mode():
@@ -418,6 +432,76 @@ class PyTorchBackend:
         with torch.inference_mode():
             self._model.generate(**generation_kwargs)
 
+    def _get_cached_kv(
+        self, prompt: str
+    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], list[torch.Tensor]] | None:
+        """Get cached KV states for prompt from persistent cache."""
+        if not self._persistent_cache:
+            return None
+
+        entry = self._persistent_cache.get(prompt, self._model_name)
+        if entry is None:
+            return None
+
+        # Move tensors to device
+        input_ids = entry.input_ids.to(self._device)
+        attention_mask = entry.attention_mask.to(self._device)
+        key_cache = [k.to(self._device) for k in entry.key_cache]
+        value_cache = [v.to(self._device) for v in entry.value_cache]
+
+        return input_ids, attention_mask, key_cache, value_cache
+
+    def _compute_and_cache_kv(
+        self,
+        prompt: str,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]] | None:
+        """Compute KV states for prompt and store in persistent cache."""
+        if not self._persistent_cache:
+            return None
+
+        try:
+            with torch.inference_mode():
+                outputs = self._model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    return_dict=True,
+                )
+
+            # Extract key and value tensors from past_key_values
+            past_key_values = outputs.past_key_values
+            if past_key_values is None:
+                return None
+
+            # Handle different cache formats (tuple or DynamicCache)
+            if hasattr(past_key_values, "key_cache"):
+                # DynamicCache format
+                key_cache = list(past_key_values.key_cache)
+                value_cache = list(past_key_values.value_cache)
+            else:
+                # Tuple format: ((k1, v1), (k2, v2), ...)
+                key_cache = [layer[0] for layer in past_key_values]
+                value_cache = [layer[1] for layer in past_key_values]
+
+            # Store in persistent cache
+            self._persistent_cache.put(
+                prompt=prompt,
+                model_name=self._model_name,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                key_cache=key_cache,
+                value_cache=value_cache,
+            )
+
+            logger.debug(f"Stored KV cache for prompt (len={len(prompt)})")
+            return key_cache, value_cache
+
+        except Exception as e:
+            logger.warning(f"Failed to compute/cache KV states: {e}")
+            return None
+
     def get_model_info(self) -> dict[str, Any]:
         """Get information about the loaded model."""
         model_config = self._model.config
@@ -432,6 +516,7 @@ class PyTorchBackend:
             "num_layers": getattr(model_config, "num_hidden_layers", None),
             "kv_cache_enabled": self._settings.use_kv_cache,
             "static_kv_cache": self._settings.static_kv_cache,
+            "persistent_cache_enabled": self._persistent_cache is not None,
             "speculative_decoding": (
                 self._settings.enable_speculative_decoding and self._draft_model is not None
             ),
@@ -439,17 +524,31 @@ class PyTorchBackend:
 
     def get_cache_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
-        return self._cache_manager.stats()
+        stats = self._cache_manager.stats()
+        if self._persistent_cache:
+            stats["persistent_cache"] = self._persistent_cache.stats()
+        return stats
 
     def clear_caches(self) -> None:
         """Clear all caches."""
         self._cache_manager.clear_all()
+        if self._persistent_cache:
+            self._persistent_cache.clear()
         logger.info("All caches cleared")
+
+    def flush_persistent_cache(self) -> None:
+        """Flush pending writes to persistent cache."""
+        if self._persistent_cache:
+            self._persistent_cache.flush()
+            logger.info("Persistent cache flushed")
 
     def shutdown(self) -> None:
         """Shutdown the backend and release resources."""
         logger.info("Shutting down PyTorch backend")
-        self.clear_caches()
+        # Flush persistent cache before clearing
+        if self._persistent_cache:
+            self._persistent_cache.shutdown()
+        self._cache_manager.clear_all()
         # Clear model references to help with memory cleanup
         del self._model
         if self._draft_model:

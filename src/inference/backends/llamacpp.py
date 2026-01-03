@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +22,182 @@ if TYPE_CHECKING:
     from llama_cpp import Llama
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StateEntry:
+    """Entry in the llama-cpp state cache."""
+
+    prompt_hash: str
+    state_data: bytes
+    num_tokens: int
+    created_at: float = field(default_factory=time.time)
+    last_accessed: float = field(default_factory=time.time)
+
+
+class LlamaCppStateCache:
+    """Persistent state cache for llama-cpp models.
+
+    Caches model state (including KV cache) after processing prompts,
+    enabling faster continuation for repeated prefixes.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path,
+        max_memory_entries: int = 10,
+        max_disk_size_gb: float = 5.0,
+        ttl_days: int = 7,
+    ) -> None:
+        self.cache_dir = Path(cache_dir)
+        self.max_memory_entries = max_memory_entries
+        self.max_disk_size_bytes = int(max_disk_size_gb * 1024 * 1024 * 1024)
+        self.ttl_seconds = ttl_days * 24 * 60 * 60
+
+        self._memory_cache: OrderedDict[str, StateEntry] = OrderedDict()
+        self._lock = threading.RLock()
+        self._disk_size_bytes = 0
+        self._hits = 0
+        self._misses = 0
+
+        # Initialize cache directory
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._load_metadata()
+
+    def _make_key(self, prompt: str) -> str:
+        """Generate cache key from prompt."""
+        return hashlib.sha256(prompt.encode()).hexdigest()[:32]
+
+    def _get_path(self, key: str) -> Path:
+        """Get file path for cache entry."""
+        return self.cache_dir / f"{key}.state"
+
+    def _load_metadata(self) -> None:
+        """Load disk cache metadata."""
+        metadata_file = self.cache_dir / "metadata.json"
+        if metadata_file.exists():
+            try:
+                with open(metadata_file) as f:
+                    data = json.load(f)
+                    self._disk_size_bytes = data.get("total_size", 0)
+            except Exception as e:
+                logger.warning(f"Failed to load state cache metadata: {e}")
+
+    def _save_metadata(self) -> None:
+        """Save disk cache metadata."""
+        metadata_file = self.cache_dir / "metadata.json"
+        try:
+            with open(metadata_file, "w") as f:
+                json.dump({"total_size": self._disk_size_bytes}, f)
+        except Exception as e:
+            logger.warning(f"Failed to save state cache metadata: {e}")
+
+    def get(self, prompt: str) -> StateEntry | None:
+        """Get cached state for prompt."""
+        key = self._make_key(prompt)
+
+        with self._lock:
+            # Check memory first
+            if key in self._memory_cache:
+                entry = self._memory_cache[key]
+                entry.last_accessed = time.time()
+                self._memory_cache.move_to_end(key)
+                self._hits += 1
+                return entry
+
+            # Check disk
+            path = self._get_path(key)
+            if path.exists():
+                try:
+                    with open(path, "rb") as f:
+                        state_data = f.read()
+
+                    # Check TTL based on file modification time
+                    mtime = path.stat().st_mtime
+                    if time.time() - mtime > self.ttl_seconds:
+                        path.unlink(missing_ok=True)
+                        self._misses += 1
+                        return None
+
+                    entry = StateEntry(
+                        prompt_hash=key,
+                        state_data=state_data,
+                        num_tokens=0,  # Unknown from disk
+                        created_at=mtime,
+                        last_accessed=time.time(),
+                    )
+
+                    # Promote to memory if space available
+                    if len(self._memory_cache) < self.max_memory_entries:
+                        self._memory_cache[key] = entry
+
+                    self._hits += 1
+                    return entry
+                except Exception as e:
+                    logger.warning(f"Failed to load state from disk: {e}")
+
+            self._misses += 1
+            return None
+
+    def put(self, prompt: str, state_data: bytes, num_tokens: int = 0) -> None:
+        """Store state for prompt."""
+        key = self._make_key(prompt)
+        size = len(state_data)
+
+        with self._lock:
+            # Evict from memory if at capacity
+            while len(self._memory_cache) >= self.max_memory_entries:
+                evicted_key, _ = self._memory_cache.popitem(last=False)
+                logger.debug(f"Evicted state from memory: {evicted_key[:8]}...")
+
+            entry = StateEntry(
+                prompt_hash=key,
+                state_data=state_data,
+                num_tokens=num_tokens,
+            )
+            self._memory_cache[key] = entry
+
+        # Write to disk asynchronously (simple sync for now)
+        try:
+            path = self._get_path(key)
+            with open(path, "wb") as f:
+                f.write(state_data)
+            self._disk_size_bytes += size
+            self._save_metadata()
+            logger.debug(f"Saved state to disk: {key[:8]}... ({size / 1024:.1f} KB)")
+        except Exception as e:
+            logger.warning(f"Failed to save state to disk: {e}")
+
+    def clear(self) -> None:
+        """Clear all cached states."""
+        with self._lock:
+            self._memory_cache.clear()
+            self._hits = 0
+            self._misses = 0
+
+        # Clear disk cache
+        try:
+            for path in self.cache_dir.glob("*.state"):
+                path.unlink(missing_ok=True)
+            self._disk_size_bytes = 0
+            self._save_metadata()
+        except Exception as e:
+            logger.warning(f"Failed to clear disk state cache: {e}")
+
+    def stats(self) -> dict[str, Any]:
+        """Get cache statistics."""
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0.0
+            return {
+                "memory_entries": len(self._memory_cache),
+                "max_memory_entries": self.max_memory_entries,
+                "disk_size_mb": self._disk_size_bytes / 1024 / 1024,
+                "max_disk_size_gb": self.max_disk_size_bytes / 1024 / 1024 / 1024,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": hit_rate,
+            }
 
 
 class LlamaCppBackend:
@@ -106,6 +288,18 @@ class LlamaCppBackend:
         if settings.enable_speculative_decoding and settings.draft_model_path:
             self._draft_model = self._load_draft_model(settings.draft_model_path, Llama)
 
+        # Initialize persistent state cache if enabled
+        self._state_cache: LlamaCppStateCache | None = None
+        self._supports_state_persistence = self._check_state_support()
+        if settings.enable_persistent_cache and self._supports_state_persistence:
+            cache_dir = Path(settings.persistent_cache_dir) / "llama-cpp-state"
+            self._state_cache = LlamaCppStateCache(
+                cache_dir=cache_dir,
+                max_memory_entries=min(10, settings.persistent_cache_memory_size // 10),
+                max_disk_size_gb=settings.persistent_cache_disk_size_gb / 2,  # Share with PyTorch
+                ttl_days=settings.persistent_cache_ttl_days,
+            )
+
         # Set model info on tracer
         if self._tracer:
             self._tracer.set_model_info(self._model_name, self.get_model_info())
@@ -116,7 +310,8 @@ class LlamaCppBackend:
             f"n_threads={settings.num_threads}, "
             f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}, "
             f"response_cache={settings.enable_response_cache}, "
-            f"speculative_decoding={self._draft_model is not None}"
+            f"speculative_decoding={self._draft_model is not None}, "
+            f"state_cache={self._state_cache is not None}"
         )
 
     @property
@@ -128,6 +323,43 @@ class LlamaCppBackend:
     def device(self) -> str:
         """Get the device the model is running on."""
         return self._device
+
+    def _check_state_support(self) -> bool:
+        """Check if the model supports state save/load operations."""
+        return hasattr(self._model, "save_state") and hasattr(self._model, "load_state")
+
+    def _save_state_for_prompt(self, prompt: str) -> None:
+        """Save model state after processing a prompt."""
+        if not self._state_cache or not self._supports_state_persistence:
+            return
+
+        try:
+            state = self._model.save_state()
+            if state:
+                # Get token count from tokenization
+                tokens = self._model.tokenize(prompt.encode())
+                self._state_cache.put(prompt, state, num_tokens=len(tokens))
+        except Exception as e:
+            logger.warning(f"Failed to save model state: {e}")
+
+    def _restore_state_for_prompt(self, prompt: str) -> bool:
+        """Restore model state if prompt was previously processed.
+
+        Returns True if state was restored, False otherwise.
+        """
+        if not self._state_cache or not self._supports_state_persistence:
+            return False
+
+        try:
+            entry = self._state_cache.get(prompt)
+            if entry:
+                self._model.load_state(entry.state_data)
+                logger.debug(f"Restored state for prompt (hash={entry.prompt_hash[:8]}...)")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to restore model state: {e}")
+
+        return False
 
     def _create_trace(
         self,
@@ -400,6 +632,8 @@ class LlamaCppBackend:
             "n_batch": self._settings.llama_cpp_n_batch,
             "max_sequence_length": self._settings.llama_cpp_n_ctx,
             "speculative_decoding": self._draft_model is not None,
+            "state_cache_enabled": self._state_cache is not None,
+            "state_persistence_supported": self._supports_state_persistence,
         }
 
     def get_cache_stats(self) -> dict[str, Any]:
@@ -412,19 +646,36 @@ class LlamaCppBackend:
         if self._response_cache:
             stats["response_cache"] = self._response_cache.stats()
 
+        if self._state_cache:
+            stats["state_cache"] = self._state_cache.stats()
+
         return stats
 
     def clear_caches(self) -> None:
-        """Clear response cache."""
+        """Clear response and state caches."""
+        cleared = False
+
         if self._response_cache:
             self._response_cache.clear()
             logger.info("Response cache cleared")
-        else:
+            cleared = True
+
+        if self._state_cache:
+            self._state_cache.clear()
+            logger.info("State cache cleared")
+            cleared = True
+
+        if not cleared:
             logger.debug("No caches to clear (llama-cpp manages KV cache internally)")
 
     def shutdown(self) -> None:
         """Shutdown the backend and release resources."""
         logger.info("Shutting down llama-cpp backend")
+
+        # Clean up state cache
+        if self._state_cache:
+            logger.debug("State cache will persist to disk for next startup")
+
         # llama-cpp-python handles cleanup via __del__
         if self._draft_model:
             del self._draft_model

@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             f"prompt_cache={settings.enable_prompt_cache}, "
             f"tokenizer_cache={settings.enable_tokenizer_cache}, "
             f"speculative={settings.enable_speculative_decoding}, "
+            f"persistent_cache={settings.enable_persistent_cache}, "
             f"tracing={tracer is not None and tracer.enabled}"
         )
     else:
@@ -64,13 +65,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             f"llama-cpp config: n_ctx={settings.llama_cpp_n_ctx}, "
             f"n_threads={settings.num_threads}, "
             f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}, "
+            f"persistent_cache={settings.enable_persistent_cache}, "
             f"tracing={tracer is not None and tracer.enabled}"
         )
+
+    # Warm persistent cache on startup if enabled
+    persistent_cache = getattr(backend, "_persistent_cache", None)
+    if (
+        settings.enable_persistent_cache
+        and settings.persistent_cache_warm_on_startup
+        and persistent_cache
+    ):
+        logger.info("Warming persistent KV cache from disk...")
+        persistent_cache.warm()
+        logger.info("Persistent cache warming complete")
 
     yield
 
     # Cleanup on shutdown
     logger.info("Shutting down, cleaning up resources...")
+
+    # Flush persistent cache to disk before shutdown
+    if settings.enable_persistent_cache and hasattr(backend, "flush_persistent_cache"):
+        logger.info("Flushing persistent cache to disk...")
+        backend.flush_persistent_cache()
+        logger.info("Persistent cache flushed")
 
     # Flush and shutdown tracer
     if tracer:

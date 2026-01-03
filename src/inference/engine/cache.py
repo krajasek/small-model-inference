@@ -1,5 +1,7 @@
 """Caching utilities for inference optimization."""
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import threading
@@ -7,10 +9,13 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from transformers import DynamicCache, PreTrainedModel, PreTrainedTokenizer
+
+if TYPE_CHECKING:
+    from .persistent_cache import PersistentCacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +156,16 @@ class PromptCache:
 
     Useful for caching system prompts or common prefixes
     to avoid recomputation in chat scenarios.
+
+    Optionally backed by a PersistentCacheManager for disk persistence.
     """
 
     def __init__(
         self,
         max_size: int = 50,
         ttl_seconds: int = 1800,
+        persistent_backend: PersistentCacheManager | None = None,
+        model_name: str = "default",
     ) -> None:
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
@@ -164,33 +173,60 @@ class PromptCache:
         self._lock = threading.RLock()
         self._hits = 0
         self._misses = 0
+        self._persistent_backend = persistent_backend
+        self._model_name = model_name
+        self._persistent_hits = 0
 
     def _make_key(self, prefix: str) -> str:
         """Generate cache key for a prefix."""
         return hashlib.md5(prefix.encode()).hexdigest()
 
-    def get(self, prefix: str) -> PromptCacheEntry | None:
-        """Get cached prompt entry if available."""
+    def get(self, prefix: str, device: str = "cpu") -> PromptCacheEntry | None:
+        """Get cached prompt entry if available.
+
+        Checks memory cache first, then falls back to persistent backend if configured.
+
+        Args:
+            prefix: The prompt prefix to look up
+            device: Device to move tensors to if loading from persistent cache
+        """
         key = self._make_key(prefix)
 
         with self._lock:
-            if key not in self._cache:
-                self._misses += 1
-                return None
+            if key in self._cache:
+                entry = self._cache[key]
 
-            entry = self._cache[key]
+                # Check TTL
+                if time.time() - entry.created_at > self.ttl_seconds:
+                    del self._cache[key]
+                else:
+                    # Move to end (most recently used)
+                    self._cache.move_to_end(key)
+                    self._hits += 1
+                    logger.debug(f"Prompt cache hit for prefix: {prefix[:50]}...")
+                    return entry
 
-            # Check TTL
-            if time.time() - entry.created_at > self.ttl_seconds:
-                del self._cache[key]
-                self._misses += 1
-                return None
+        # Check persistent backend on memory miss
+        if self._persistent_backend:
+            try:
+                cached_kv = self._persistent_backend.get(prefix, self._model_name)
+                if cached_kv is not None:
+                    # Reconstruct entry from persistent cache
+                    # Note: We only get KV cache from persistent storage,
+                    # not input_ids/attention_mask - those need to be recomputed
+                    self._persistent_hits += 1
+                    logger.debug(f"Persistent cache hit for prefix: {prefix[:50]}...")
+                    return PromptCacheEntry(
+                        input_ids=torch.tensor([]),  # Will be recomputed
+                        attention_mask=torch.tensor([]),  # Will be recomputed
+                        past_key_values=cached_kv,
+                    )
+            except Exception as e:
+                logger.warning(f"Error retrieving from persistent cache: {e}")
 
-            # Move to end (most recently used)
-            self._cache.move_to_end(key)
-            self._hits += 1
-            logger.debug(f"Prompt cache hit for prefix: {prefix[:50]}...")
-            return entry
+        with self._lock:
+            self._misses += 1
+        return None
 
     def put(
         self,
@@ -199,7 +235,10 @@ class PromptCache:
         attention_mask: torch.Tensor,
         past_key_values: DynamicCache | None = None,
     ) -> None:
-        """Store tokenized prompt and optional KV states in cache."""
+        """Store tokenized prompt and optional KV states in cache.
+
+        Also writes to persistent backend if configured and KV values are provided.
+        """
         key = self._make_key(prefix)
 
         with self._lock:
@@ -220,6 +259,19 @@ class PromptCache:
                 past_key_values=past_key_values,
             )
             logger.debug(f"Cached prompt: {prefix[:50]}...")
+
+        # Also store in persistent backend if configured
+        if self._persistent_backend and past_key_values is not None:
+            try:
+                num_tokens = input_ids.shape[-1] if input_ids.numel() > 0 else 0
+                self._persistent_backend.put(
+                    prompt=prefix,
+                    model_name=self._model_name,
+                    kv_cache=past_key_values,
+                    num_tokens=num_tokens,
+                )
+            except Exception as e:
+                logger.warning(f"Error storing in persistent cache: {e}")
 
     def get_or_compute_kv(
         self,
@@ -262,24 +314,44 @@ class PromptCache:
 
         return input_ids, attention_mask, past_key_values
 
-    def clear(self) -> None:
-        """Clear all cached prompts."""
+    def clear(self, include_persistent: bool = False) -> None:
+        """Clear all cached prompts.
+
+        Args:
+            include_persistent: If True, also clears the persistent cache backend
+        """
         with self._lock:
             self._cache.clear()
             logger.info("Prompt cache cleared")
+
+        if include_persistent and self._persistent_backend:
+            try:
+                self._persistent_backend.clear()
+                logger.info("Persistent cache cleared")
+            except Exception as e:
+                logger.warning(f"Error clearing persistent cache: {e}")
 
     def stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         with self._lock:
             total = self._hits + self._misses
             hit_rate = self._hits / total if total > 0 else 0.0
-            return {
+            stats: dict[str, Any] = {
                 "size": len(self._cache),
                 "max_size": self.max_size,
                 "hits": self._hits,
                 "misses": self._misses,
                 "hit_rate": hit_rate,
+                "persistent_hits": self._persistent_hits,
             }
+
+        if self._persistent_backend:
+            try:
+                stats["persistent_backend"] = self._persistent_backend.stats()
+            except Exception as e:
+                logger.warning(f"Error getting persistent cache stats: {e}")
+
+        return stats
 
 
 class TokenizerCache:
@@ -388,6 +460,8 @@ class CacheManager:
         enable_response_cache: bool = True,
         enable_prompt_cache: bool = True,
         enable_tokenizer_cache: bool = True,
+        persistent_backend: PersistentCacheManager | None = None,
+        model_name: str = "default",
     ) -> None:
         self.response_cache = (
             ResponseCache(max_size=response_cache_size, ttl_seconds=response_cache_ttl)
@@ -395,25 +469,36 @@ class CacheManager:
             else None
         )
         self.prompt_cache = (
-            PromptCache(max_size=prompt_cache_size, ttl_seconds=prompt_cache_ttl)
+            PromptCache(
+                max_size=prompt_cache_size,
+                ttl_seconds=prompt_cache_ttl,
+                persistent_backend=persistent_backend,
+                model_name=model_name,
+            )
             if enable_prompt_cache
             else None
         )
         self.tokenizer_cache = (
             TokenizerCache(max_size=tokenizer_cache_size) if enable_tokenizer_cache else None
         )
+        self._persistent_backend = persistent_backend
 
         logger.info(
             f"CacheManager initialized: response={enable_response_cache}, "
-            f"prompt={enable_prompt_cache}, tokenizer={enable_tokenizer_cache}"
+            f"prompt={enable_prompt_cache}, tokenizer={enable_tokenizer_cache}, "
+            f"persistent={persistent_backend is not None}"
         )
 
-    def clear_all(self) -> None:
-        """Clear all caches."""
+    def clear_all(self, include_persistent: bool = False) -> None:
+        """Clear all caches.
+
+        Args:
+            include_persistent: If True, also clears the persistent cache backend
+        """
         if self.response_cache:
             self.response_cache.clear()
         if self.prompt_cache:
-            self.prompt_cache.clear()
+            self.prompt_cache.clear(include_persistent=include_persistent)
         if self.tokenizer_cache:
             self.tokenizer_cache.clear()
 

@@ -248,6 +248,30 @@ async def clear_caches(engine: EngineDep) -> dict:
     return {"status": "ok", "message": "All caches cleared"}
 
 
+@router.post("/v1/cache/persistent/flush")
+async def flush_persistent_cache(engine: EngineDep) -> dict:
+    """Force flush persistent cache to disk.
+
+    Ensures all pending writes are completed synchronously.
+    """
+    if hasattr(engine, "flush_persistent_cache"):
+        engine.flush_persistent_cache()
+        return {"status": "ok", "message": "Persistent cache flushed to disk"}
+    return {"status": "skipped", "message": "Persistent cache not enabled"}
+
+
+@router.post("/v1/cache/persistent/warm")
+async def warm_persistent_cache(engine: EngineDep) -> dict:
+    """Trigger persistent cache warming.
+
+    Loads frequently accessed entries from disk into memory.
+    """
+    if hasattr(engine, "_persistent_cache") and engine._persistent_cache:
+        engine._persistent_cache.warm()
+        return {"status": "ok", "message": "Persistent cache warmed"}
+    return {"status": "skipped", "message": "Persistent cache not enabled"}
+
+
 @router.get("/v1/tracing/status")
 async def get_tracing_status(request: Request) -> dict:
     """Get tracing status and configuration."""
