@@ -1,14 +1,19 @@
 """llama-cpp-python backend for fast CPU inference."""
 
+from __future__ import annotations
+
 import logging
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import Settings
 from ..engine.cache import ResponseCache
 from ..observability.tracing import GenerationTrace, InferenceTracer
 from .base import GenerationConfig
+
+if TYPE_CHECKING:
+    from llama_cpp import Llama
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +44,7 @@ class LlamaCppBackend:
             from llama_cpp import Llama
         except ImportError as e:
             raise ImportError(
-                "llama-cpp-python is not installed. "
-                "Install it with: pip install llama-cpp-python"
+                "llama-cpp-python is not installed. Install it with: pip install llama-cpp-python"
             ) from e
 
         self._settings = settings
@@ -66,9 +70,7 @@ class LlamaCppBackend:
             model_file = str(gguf_files[0])
             self._model_name = settings.model_name or gguf_files[0].stem
             if len(gguf_files) > 1:
-                logger.warning(
-                    f"Multiple .gguf files found, using: {gguf_files[0].name}"
-                )
+                logger.warning(f"Multiple .gguf files found, using: {gguf_files[0].name}")
         else:
             raise FileNotFoundError(
                 f"Invalid model path: {self._model_path}. "
@@ -98,6 +100,12 @@ class LlamaCppBackend:
                 ttl_seconds=settings.response_cache_ttl,
             )
 
+        # Load draft model for speculative decoding if configured
+        self._draft_model: Llama | None = None
+        self._num_speculative_tokens = settings.num_speculative_tokens
+        if settings.enable_speculative_decoding and settings.draft_model_path:
+            self._draft_model = self._load_draft_model(settings.draft_model_path, Llama)
+
         # Set model info on tracer
         if self._tracer:
             self._tracer.set_model_info(self._model_name, self.get_model_info())
@@ -107,7 +115,8 @@ class LlamaCppBackend:
             f"n_ctx={settings.llama_cpp_n_ctx}, "
             f"n_threads={settings.num_threads}, "
             f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}, "
-            f"response_cache={settings.enable_response_cache}"
+            f"response_cache={settings.enable_response_cache}, "
+            f"speculative_decoding={self._draft_model is not None}"
         )
 
     @property
@@ -134,6 +143,57 @@ class LlamaCppBackend:
                 session_id=session_id,
             )
         return None
+
+    def _load_draft_model(self, draft_model_path: str, llama_cls: type[Llama]) -> Llama | None:
+        """Load a draft model for speculative decoding.
+
+        Args:
+            draft_model_path: Path to the draft model GGUF file
+            llama_cls: The Llama class to use for loading
+
+        Returns:
+            Loaded draft model or None if loading fails
+        """
+        try:
+            draft_path = Path(draft_model_path)
+
+            if not draft_path.exists():
+                logger.warning(f"Draft model path does not exist: {draft_path}")
+                return None
+
+            # Determine the GGUF file path
+            if draft_path.is_file() and draft_path.suffix == ".gguf":
+                draft_file = str(draft_path)
+            elif draft_path.is_dir():
+                gguf_files = list(draft_path.glob("*.gguf"))
+                if not gguf_files:
+                    logger.warning(f"No .gguf files found in {draft_path}")
+                    return None
+                draft_file = str(gguf_files[0])
+                if len(gguf_files) > 1:
+                    logger.warning(f"Multiple .gguf files found, using: {gguf_files[0].name}")
+            else:
+                logger.warning(f"Invalid draft model path: {draft_path}")
+                return None
+
+            logger.info(f"Loading draft model from {draft_file}")
+
+            # Load draft model with same settings as main model
+            draft_model = llama_cls(
+                model_path=draft_file,
+                n_ctx=self._settings.llama_cpp_n_ctx,
+                n_threads=self._settings.num_threads,
+                n_gpu_layers=self._settings.llama_cpp_n_gpu_layers,
+                n_batch=self._settings.llama_cpp_n_batch,
+                verbose=False,
+            )
+
+            logger.info("Draft model loaded successfully for speculative decoding")
+            return draft_model
+
+        except Exception as e:
+            logger.warning(f"Failed to load draft model: {e}")
+            return None
 
     def generate(
         self,
@@ -179,16 +239,23 @@ class LlamaCppBackend:
                         trace.__exit__(None, None, None)
                     return cached
 
+            # Build generation kwargs
+            gen_kwargs: dict[str, Any] = {
+                "max_tokens": config.max_new_tokens,
+                "temperature": config.temperature if config.do_sample else 0.0,
+                "top_p": config.top_p,
+                "top_k": config.top_k,
+                "repeat_penalty": config.repetition_penalty,
+                "echo": False,  # Don't include prompt in output
+            }
+
+            # Add speculative decoding if draft model is available
+            if self._draft_model is not None:
+                logger.debug("Using speculative decoding with draft model")
+                gen_kwargs["draft_model"] = self._draft_model
+
             # Generate with llama-cpp
-            output = self._model(
-                prompt,
-                max_tokens=config.max_new_tokens,
-                temperature=config.temperature if config.do_sample else 0.0,
-                top_p=config.top_p,
-                top_k=config.top_k,
-                repeat_penalty=config.repetition_penalty,
-                echo=False,  # Don't include prompt in output
-            )
+            output = self._model(prompt, **gen_kwargs)
 
             # Extract text and usage from output
             generated_text = output["choices"][0]["text"]
@@ -262,17 +329,24 @@ class LlamaCppBackend:
             prompt_tokens = 0
             completion_tokens = 0
 
+            # Build generation kwargs
+            gen_kwargs: dict[str, Any] = {
+                "max_tokens": config.max_new_tokens,
+                "temperature": config.temperature if config.do_sample else 0.0,
+                "top_p": config.top_p,
+                "top_k": config.top_k,
+                "repeat_penalty": config.repetition_penalty,
+                "echo": False,
+                "stream": True,
+            }
+
+            # Add speculative decoding if draft model is available
+            if self._draft_model is not None:
+                logger.debug("Using speculative decoding with draft model (streaming)")
+                gen_kwargs["draft_model"] = self._draft_model
+
             # Stream with llama-cpp
-            for output in self._model(
-                prompt,
-                max_tokens=config.max_new_tokens,
-                temperature=config.temperature if config.do_sample else 0.0,
-                top_p=config.top_p,
-                top_k=config.top_k,
-                repeat_penalty=config.repetition_penalty,
-                echo=False,
-                stream=True,
-            ):
+            for output in self._model(prompt, **gen_kwargs):
                 if first_token:
                     if trace:
                         trace.record_first_token()
@@ -325,6 +399,7 @@ class LlamaCppBackend:
             "n_gpu_layers": self._settings.llama_cpp_n_gpu_layers,
             "n_batch": self._settings.llama_cpp_n_batch,
             "max_sequence_length": self._settings.llama_cpp_n_ctx,
+            "speculative_decoding": self._draft_model is not None,
         }
 
     def get_cache_stats(self) -> dict[str, Any]:
@@ -351,4 +426,6 @@ class LlamaCppBackend:
         """Shutdown the backend and release resources."""
         logger.info("Shutting down llama-cpp backend")
         # llama-cpp-python handles cleanup via __del__
+        if self._draft_model:
+            del self._draft_model
         del self._model

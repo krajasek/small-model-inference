@@ -27,6 +27,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - [Observability](#observability)
 - [Docker Deployment](#docker-deployment)
 - [Examples](#examples)
+- [Speculative Decoding](#speculative-decoding)
 - [CLI Client](#cli-client)
 
 ---
@@ -129,8 +130,8 @@ uv run python main.py
 | GPU support | CUDA, MPS | Optional GPU layers |
 | Memory usage | Higher | Lower (quantized) |
 | Prompt caching | Yes | Internal |
-| Speculative decoding | Yes | No |
-| Response caching | Yes | No |
+| Speculative decoding | Yes | Yes |
+| Response caching | Yes | Yes |
 
 ---
 
@@ -662,6 +663,244 @@ async def stream_chat():
 
 asyncio.run(stream_chat())
 ```
+
+### Speculative Decoding
+
+Speculative decoding uses a smaller "draft" model to predict multiple tokens ahead, which are then verified by the main model. This can significantly speed up generation for compatible model pairs.
+
+Both backends support speculative decoding:
+- **PyTorch**: Uses HuggingFace model format
+- **llama-cpp**: Uses GGUF model format (recommended for CPU inference)
+
+#### Setup with llama-cpp (GGUF Models)
+
+```bash
+# Install llama-cpp-python
+uv sync --extra llama-cpp
+
+# Download Mistral 7B Instruct GGUF as the main model
+huggingface-cli download TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+  mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+  --local-dir ./models
+
+# Download TinyLlama 1.1B Chat GGUF as the draft model
+huggingface-cli download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF \
+  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+  --local-dir ./models
+```
+
+#### Running the Server (llama-cpp)
+
+```bash
+# Start with speculative decoding enabled (llama-cpp backend)
+INFERENCE_BACKEND=llama-cpp \
+INFERENCE_MODEL_PATH=./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+INFERENCE_ENABLE_SPECULATIVE_DECODING=true \
+INFERENCE_DRAFT_MODEL_PATH=./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+INFERENCE_NUM_THREADS=8 \
+INFERENCE_LLAMA_CPP_N_CTX=4096 \
+uv run python main.py
+```
+
+#### Setup with PyTorch (HuggingFace Models)
+
+```bash
+# Download Mistral 7B Instruct as the main model
+huggingface-cli download mistralai/Mistral-7B-Instruct-v0.2 \
+  --local-dir ./models/mistral-7b-instruct
+
+# Download TinyLlama 1.1B Chat as the draft model
+huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --local-dir ./models/tinyllama-1.1b-chat
+```
+
+#### Running the Server (PyTorch)
+
+```bash
+# Start with speculative decoding enabled (PyTorch backend)
+INFERENCE_BACKEND=pytorch \
+INFERENCE_MODEL_PATH=./models/mistral-7b-instruct \
+INFERENCE_ENABLE_SPECULATIVE_DECODING=true \
+INFERENCE_DRAFT_MODEL_PATH=./models/tinyllama-1.1b-chat \
+INFERENCE_NUM_SPECULATIVE_TOKENS=4 \
+INFERENCE_DEVICE=cpu \
+INFERENCE_NUM_THREADS=8 \
+uv run python main.py
+```
+
+#### REST API Example
+
+```bash
+# Chat completion with speculative decoding
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Explain quantum computing in simple terms."}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+```
+
+#### WebSocket API Example (Low-Latency Streaming)
+
+The WebSocket API provides the lowest latency for streaming responses with speculative decoding. It uses a binary protobuf wire format for efficient communication.
+
+```python
+import asyncio
+import betterproto
+import websockets
+from inference.proto import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ClientMessage,
+    GenerationParams,
+    ServerMessage,
+)
+
+
+async def stream_with_speculative_decoding():
+    """Stream chat completion using WebSocket with speculative decoding."""
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        # Create chat completion request
+        request = ClientMessage(
+            request_id="spec-decode-001",
+            chat_completion=ChatCompletionRequest(
+                messages=[
+                    ChatMessage(
+                        role="system",
+                        content="You are a helpful coding assistant.",
+                    ),
+                    ChatMessage(
+                        role="user",
+                        content="Write a Python function to calculate fibonacci numbers.",
+                    ),
+                ],
+                params=GenerationParams(
+                    max_tokens=300,
+                    temperature=0.7,
+                    top_p=0.9,
+                ),
+            ),
+        )
+
+        # Send binary protobuf request
+        await websocket.send(bytes(request))
+
+        # Stream responses
+        full_response = []
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+                    full_response.append(content)
+            elif payload_type == "complete":
+                usage = msg.complete.usage
+                print(f"\n\n[Completed: {usage.total_tokens} tokens]")
+                break
+            elif payload_type == "error":
+                print(f"\nError: {msg.error.message}")
+                break
+
+        return "".join(full_response)
+
+
+# Run the example
+asyncio.run(stream_with_speculative_decoding())
+```
+
+#### WebSocket Text Completion Example
+
+```python
+import asyncio
+import betterproto
+import websockets
+from inference.proto import (
+    ClientMessage,
+    CompletionRequest,
+    GenerationParams,
+    ServerMessage,
+)
+
+
+async def stream_completion():
+    """Stream text completion using WebSocket with speculative decoding."""
+    uri = "ws://localhost:8000/v1/stream"
+
+    async with websockets.connect(uri) as websocket:
+        request = ClientMessage(
+            request_id="completion-001",
+            completion=CompletionRequest(
+                prompt="The key benefits of speculative decoding are:",
+                params=GenerationParams(
+                    max_tokens=150,
+                    temperature=0.7,
+                ),
+            ),
+        )
+
+        await websocket.send(bytes(request))
+
+        while True:
+            data = await websocket.recv()
+            msg = ServerMessage().parse(data)
+
+            payload_type, _ = betterproto.which_one_of(msg, "payload")
+
+            if payload_type == "chunk":
+                content = msg.chunk.choice.delta.content
+                if content:
+                    print(content, end="", flush=True)
+            elif payload_type == "complete":
+                print(f"\n[Done - {msg.complete.usage.total_tokens} tokens]")
+                break
+            elif payload_type == "error":
+                print(f"Error: {msg.error.message}")
+                break
+
+
+asyncio.run(stream_completion())
+```
+
+#### Python OpenAI Client Example
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-needed",
+)
+
+# Speculative decoding works transparently with the API
+response = client.chat.completions.create(
+    model="local-model",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Write a haiku about programming."},
+    ],
+    max_tokens=100,
+)
+print(response.choices[0].message.content)
+```
+
+#### Configuration Tips
+
+| Setting | Recommendation |
+|---------|----------------|
+| `NUM_SPECULATIVE_TOKENS` | Start with 4, increase to 6-8 for longer generations |
+| Draft model size | ~10-20% of main model size works well |
+| Memory | Ensure enough RAM for both models (main + draft) |
+| Backend | Use llama-cpp for best CPU performance with GGUF models |
 
 ---
 
