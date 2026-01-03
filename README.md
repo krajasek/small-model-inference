@@ -10,6 +10,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - **Streaming Support** - Real-time token streaming via HTTP SSE or WebSocket
 - **CPU Optimized** - Designed for efficient CPU inference with threading and quantization
 - **Multiple Caching Layers** - Response, prompt/KV, and tokenizer caching for faster responses
+- **Persistent KV Cache** - LMCache-inspired disk persistence for KV cache states across restarts
 - **Quantization** - int8 and int4 quantization support for reduced memory and faster inference
 - **Continuous Batching** - Optional request batching for high-throughput scenarios
 - **Speculative Decoding** - Use draft models to accelerate generation
@@ -24,6 +25,7 @@ A CPU-friendly inference server for serving small language models (up to 10B par
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Performance Optimization](#performance-optimization)
+- [Persistent KV Cache](#persistent-kv-cache)
 - [Observability](#observability)
 - [Docker Deployment](#docker-deployment)
 - [Examples](#examples)
@@ -147,6 +149,8 @@ uv run python main.py
 | `/v1/models` | GET | List loaded model info |
 | `/v1/cache/stats` | GET | Cache statistics and hit rates |
 | `/v1/cache/clear` | POST | Clear all caches |
+| `/v1/cache/persistent/flush` | POST | Force flush persistent cache to disk |
+| `/v1/cache/persistent/warm` | POST | Trigger persistent cache warming |
 | `/v1/tracing/status` | GET | Tracing status and configuration |
 | `/health` | GET | Health check |
 
@@ -244,6 +248,20 @@ All configuration is done via environment variables with the `INFERENCE_` prefix
 | `INFERENCE_USE_KV_CACHE` | `true` | Enable KV caching during generation |
 | `INFERENCE_STATIC_KV_CACHE` | `false` | Use static cache allocation |
 
+### Persistent KV Cache Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_ENABLE_PERSISTENT_CACHE` | `false` | Enable persistent KV cache to disk |
+| `INFERENCE_PERSISTENT_CACHE_DIR` | `.cache/kv` | Directory for disk cache |
+| `INFERENCE_PERSISTENT_CACHE_MEMORY_SIZE` | `100` | Max entries in memory tier |
+| `INFERENCE_PERSISTENT_CACHE_DISK_SIZE_GB` | `10.0` | Max disk cache size (GB) |
+| `INFERENCE_PERSISTENT_CACHE_CHUNK_SIZE` | `256` | Tokens per cache chunk |
+| `INFERENCE_PERSISTENT_CACHE_COMPRESSION` | `zstd` | Compression: `none`, `zstd`, `lz4` |
+| `INFERENCE_PERSISTENT_CACHE_ASYNC_WRITES` | `true` | Use async disk writes |
+| `INFERENCE_PERSISTENT_CACHE_WARM_ON_STARTUP` | `true` | Warm cache on server start |
+| `INFERENCE_PERSISTENT_CACHE_TTL_DAYS` | `7` | Disk entry TTL in days |
+
 ### Batching Settings
 
 | Variable | Default | Description |
@@ -321,6 +339,224 @@ INFERENCE_QUANTIZATION=int8 uv run python main.py
 | 1-3B params | 8-12 GB | 4-8 | int8 |
 | 3-7B params | 16-24 GB | 8 | int8 |
 | 7-10B params | 24-32 GB | 8+ | int8 |
+
+---
+
+## Persistent KV Cache
+
+The persistent KV cache provides LMCache-inspired disk persistence for KV cache states, enabling faster inference for repeated prompts even across server restarts. This is especially useful for:
+
+- **System prompts** - Cache the KV states for common system prompts
+- **Few-shot examples** - Reuse cached states for repeated example prefixes
+- **Chat continuations** - Speed up multi-turn conversations with cached context
+- **Server restarts** - Preserve cache across deployments and restarts
+
+### Architecture
+
+The persistent cache uses a two-tier storage architecture:
+
+```
+┌─────────────────────────────────────────┐
+│         PersistentCacheManager          │
+│  - Coordinates tiered cache operations  │
+│  - Handles cache warming on startup     │
+└──────────────────┬──────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        ▼                     ▼
+┌───────────────┐    ┌────────────────┐
+│ MemoryCacheTier│    │ DiskCacheTier  │
+│ (LRU, fast)   │    │ (persistent)   │
+└───────────────┘    └────────────────┘
+```
+
+- **Memory Tier**: Fast LRU cache for frequently accessed entries
+- **Disk Tier**: Compressed persistent storage with async I/O
+
+### Backend Support
+
+| Backend | Cache Type | Description |
+|---------|------------|-------------|
+| PyTorch | DynamicCache | Full KV cache serialization with compression |
+| llama-cpp | Model State | State-based caching using save/load_state |
+
+### Enabling Persistent Cache
+
+```bash
+# Basic setup with defaults
+INFERENCE_ENABLE_PERSISTENT_CACHE=true \
+INFERENCE_MODEL_PATH=./models/tinyllama-1.1b-chat \
+uv run python main.py
+```
+
+### Production Configuration
+
+```bash
+# Production setup with tuned settings
+INFERENCE_ENABLE_PERSISTENT_CACHE=true \
+INFERENCE_PERSISTENT_CACHE_DIR=/data/kv-cache \
+INFERENCE_PERSISTENT_CACHE_MEMORY_SIZE=200 \
+INFERENCE_PERSISTENT_CACHE_DISK_SIZE_GB=50.0 \
+INFERENCE_PERSISTENT_CACHE_COMPRESSION=zstd \
+INFERENCE_PERSISTENT_CACHE_TTL_DAYS=14 \
+INFERENCE_MODEL_PATH=./models/mistral-7b-instruct \
+uv run python main.py
+```
+
+### Docker with Persistent Cache
+
+Mount a volume for cache persistence across container restarts:
+
+```bash
+docker run -d \
+  --name inference-server \
+  -p 8000:8000 \
+  -v /path/to/model:/models:ro \
+  -v /path/to/cache:/app/.cache/kv \
+  -e INFERENCE_ENABLE_PERSISTENT_CACHE=true \
+  -e INFERENCE_PERSISTENT_CACHE_DIR=/app/.cache/kv \
+  small-model-inference:latest
+```
+
+### Monitoring Cache Performance
+
+```bash
+# Get cache statistics including persistent cache
+curl http://localhost:8000/v1/cache/stats
+```
+
+Example response:
+```json
+{
+  "caches": {
+    "prompt_cache": {
+      "size": 25,
+      "max_size": 50,
+      "hits": 150,
+      "misses": 30,
+      "hit_rate": 0.833,
+      "persistent_hits": 45,
+      "persistent_backend": {
+        "memory_entries": 25,
+        "disk_entries": 120,
+        "disk_size_mb": 245.5,
+        "memory_hit_rate": 0.75,
+        "disk_hit_rate": 0.92
+      }
+    }
+  }
+}
+```
+
+### Cache Management Endpoints
+
+```bash
+# Force flush pending writes to disk
+curl -X POST http://localhost:8000/v1/cache/persistent/flush
+
+# Manually trigger cache warming (loads disk entries to memory)
+curl -X POST http://localhost:8000/v1/cache/persistent/warm
+
+# Clear all caches including persistent
+curl -X POST http://localhost:8000/v1/cache/clear
+```
+
+### Python Usage Example
+
+```python
+import httpx
+
+# First request - computes and caches KV states
+response = httpx.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "messages": [
+            {"role": "system", "content": "You are a helpful coding assistant."},
+            {"role": "user", "content": "What is Python?"},
+        ],
+        "max_tokens": 100,
+    },
+    timeout=60.0,
+)
+print("First request:", response.json()["usage"])
+
+# Second request with same system prompt - uses cached KV states
+response = httpx.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "messages": [
+            {"role": "system", "content": "You are a helpful coding assistant."},
+            {"role": "user", "content": "How do I read a file?"},
+        ],
+        "max_tokens": 100,
+    },
+    timeout=60.0,
+)
+print("Second request (cached):", response.json()["usage"])
+
+# Check cache stats
+stats = httpx.get("http://localhost:8000/v1/cache/stats").json()
+print("Persistent cache hits:", stats["caches"]["prompt_cache"]["persistent_hits"])
+```
+
+### Compression Options
+
+| Algorithm | Compression Ratio | Speed | Use Case |
+|-----------|-------------------|-------|----------|
+| `none` | 1.0x | Fastest | Development, SSDs |
+| `zstd` | ~3-4x | Fast | Production (default) |
+| `lz4` | ~2x | Faster | High throughput, lower latency |
+
+```bash
+# Use LZ4 for lower latency
+INFERENCE_PERSISTENT_CACHE_COMPRESSION=lz4 uv run python main.py
+
+# Disable compression for fastest I/O
+INFERENCE_PERSISTENT_CACHE_COMPRESSION=none uv run python main.py
+```
+
+### Cache Warming
+
+On server startup, the cache automatically warms by loading recently used entries from disk into memory. This provides immediate cache hits for common prompts.
+
+```bash
+# Disable automatic warming (manual control)
+INFERENCE_PERSISTENT_CACHE_WARM_ON_STARTUP=false uv run python main.py
+```
+
+Then trigger warming manually when ready:
+```bash
+curl -X POST http://localhost:8000/v1/cache/persistent/warm
+```
+
+### Storage Format
+
+The cache uses a binary format with the following header:
+
+```
+Header (64 bytes):
+├── Magic: "LMKV" (4 bytes)
+├── Version (2 bytes)
+├── Compression (1 byte): 0=none, 1=zstd, 2=lz4
+├── Tensor dtype (1 byte)
+├── Num layers (4 bytes)
+├── Num heads (4 bytes)
+├── Head dim (4 bytes)
+├── Seq length (4 bytes)
+├── Checksum xxhash64 (8 bytes)
+└── Reserved (32 bytes)
+
+Body: Layer-wise K/V tensors (compressed)
+```
+
+### Recommended Settings
+
+| Scenario | Memory Size | Disk Size | Compression | TTL |
+|----------|-------------|-----------|-------------|-----|
+| Development | 50 | 5 GB | none | 1 day |
+| Production (small) | 100 | 20 GB | zstd | 7 days |
+| Production (large) | 200 | 100 GB | zstd | 14 days |
+| High throughput | 500 | 50 GB | lz4 | 7 days |
 
 ---
 
