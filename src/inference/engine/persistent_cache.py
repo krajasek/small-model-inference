@@ -779,6 +779,14 @@ class PersistentCacheManager:
         self.disk_tier.clear()
         logger.info("Persistent cache cleared")
 
+    def warm(self, max_entries: int = 20) -> None:
+        """Warm cache by loading entries from disk to memory.
+
+        Args:
+            max_entries: Maximum number of entries to load
+        """
+        self._warm_cache(max_entries)
+
     def flush(self) -> None:
         """Flush pending disk writes."""
         self.disk_tier.flush()
