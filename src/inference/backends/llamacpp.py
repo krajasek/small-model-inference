@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+import numpy.typing as npt
+
 from ..config import Settings
 from ..engine.cache import ResponseCache
 from ..observability.tracing import GenerationTrace, InferenceTracer
@@ -22,6 +25,55 @@ if TYPE_CHECKING:
     from llama_cpp import Llama
 
 logger = logging.getLogger(__name__)
+
+
+class LlamaCppDraftModelWrapper:
+    """Wrapper to use a Llama model as a draft model for speculative decoding.
+
+    Implements the LlamaDraftModel interface expected by llama-cpp-python.
+    """
+
+    def __init__(self, draft_llama: Llama, num_pred_tokens: int = 4) -> None:
+        """Initialize the draft model wrapper.
+
+        Args:
+            draft_llama: The Llama instance to use as draft model
+            num_pred_tokens: Number of tokens to predict per speculation step
+        """
+        self._draft = draft_llama
+        self._num_pred_tokens = num_pred_tokens
+
+    def __call__(
+        self,
+        input_ids: npt.NDArray[np.intc],
+        /,
+        **kwargs: Any,
+    ) -> npt.NDArray[np.intc]:
+        """Generate draft tokens from the input.
+
+        Args:
+            input_ids: Input token IDs
+
+        Returns:
+            Predicted token IDs
+        """
+        # Reset the draft model's KV cache and eval the input
+        self._draft.reset()
+        self._draft.eval(input_ids.tolist())
+
+        # Generate draft tokens
+        draft_tokens = []
+        for _ in range(self._num_pred_tokens):
+            # Sample next token
+            token = self._draft.sample(
+                temp=0.0,  # Greedy for draft
+            )
+            if token == self._draft.token_eos():
+                break
+            draft_tokens.append(token)
+            self._draft.eval([token])
+
+        return np.array(draft_tokens, dtype=np.intc)
 
 
 @dataclass
@@ -261,7 +313,26 @@ class LlamaCppBackend:
 
         logger.info(f"Loading llama-cpp model from {model_file}")
 
-        # Initialize llama-cpp model
+        # Load draft model for speculative decoding if configured
+        # Must be done before main model initialization
+        self._draft_model_wrapper: LlamaCppDraftModelWrapper | None = None
+        self._num_speculative_tokens = settings.num_speculative_tokens
+        self._speculative_decoding_enabled = False
+
+        if settings.enable_speculative_decoding and settings.draft_model_path:
+            draft_llama = self._load_draft_model(settings.draft_model_path, Llama)
+            if draft_llama is not None:
+                self._draft_model_wrapper = LlamaCppDraftModelWrapper(
+                    draft_llama=draft_llama,
+                    num_pred_tokens=settings.num_speculative_tokens,
+                )
+                self._speculative_decoding_enabled = True
+                logger.info(
+                    f"Speculative decoding enabled with {settings.num_speculative_tokens} "
+                    "draft tokens per step"
+                )
+
+        # Initialize llama-cpp model with optional draft model
         self._model = Llama(
             model_path=model_file,
             n_ctx=settings.llama_cpp_n_ctx,
@@ -269,6 +340,7 @@ class LlamaCppBackend:
             n_gpu_layers=settings.llama_cpp_n_gpu_layers,
             n_batch=settings.llama_cpp_n_batch,
             verbose=False,
+            draft_model=self._draft_model_wrapper,
         )
 
         # Determine device string for reporting
@@ -281,12 +353,6 @@ class LlamaCppBackend:
                 max_size=settings.response_cache_size,
                 ttl_seconds=settings.response_cache_ttl,
             )
-
-        # Load draft model for speculative decoding if configured
-        self._draft_model: Llama | None = None
-        self._num_speculative_tokens = settings.num_speculative_tokens
-        if settings.enable_speculative_decoding and settings.draft_model_path:
-            self._draft_model = self._load_draft_model(settings.draft_model_path, Llama)
 
         # Initialize persistent state cache if enabled
         self._state_cache: LlamaCppStateCache | None = None
@@ -310,7 +376,7 @@ class LlamaCppBackend:
             f"n_threads={settings.num_threads}, "
             f"n_gpu_layers={settings.llama_cpp_n_gpu_layers}, "
             f"response_cache={settings.enable_response_cache}, "
-            f"speculative_decoding={self._draft_model is not None}, "
+            f"speculative_decoding={self._speculative_decoding_enabled}, "
             f"state_cache={self._state_cache is not None}"
         )
 
@@ -481,12 +547,8 @@ class LlamaCppBackend:
                 "echo": False,  # Don't include prompt in output
             }
 
-            # Add speculative decoding if draft model is available
-            if self._draft_model is not None:
-                logger.debug("Using speculative decoding with draft model")
-                gen_kwargs["draft_model"] = self._draft_model
-
             # Generate with llama-cpp
+            # Note: Draft model for speculative decoding is set at initialization
             output = self._model(prompt, **gen_kwargs)
 
             # Extract text and usage from output
@@ -572,12 +634,8 @@ class LlamaCppBackend:
                 "stream": True,
             }
 
-            # Add speculative decoding if draft model is available
-            if self._draft_model is not None:
-                logger.debug("Using speculative decoding with draft model (streaming)")
-                gen_kwargs["draft_model"] = self._draft_model
-
             # Stream with llama-cpp
+            # Note: Draft model for speculative decoding is set at initialization
             for output in self._model(prompt, **gen_kwargs):
                 if first_token:
                     if trace:
@@ -631,7 +689,7 @@ class LlamaCppBackend:
             "n_gpu_layers": self._settings.llama_cpp_n_gpu_layers,
             "n_batch": self._settings.llama_cpp_n_batch,
             "max_sequence_length": self._settings.llama_cpp_n_ctx,
-            "speculative_decoding": self._draft_model is not None,
+            "speculative_decoding": self._speculative_decoding_enabled,
             "state_cache_enabled": self._state_cache is not None,
             "state_persistence_supported": self._supports_state_persistence,
         }
@@ -677,6 +735,6 @@ class LlamaCppBackend:
             logger.debug("State cache will persist to disk for next startup")
 
         # llama-cpp-python handles cleanup via __del__
-        if self._draft_model:
-            del self._draft_model
+        if self._draft_model_wrapper:
+            del self._draft_model_wrapper
         del self._model
