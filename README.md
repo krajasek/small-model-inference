@@ -549,6 +549,91 @@ Header (64 bytes):
 Body: Layer-wise K/V tensors (compressed)
 ```
 
+### Testing the Persistent Cache
+
+Follow these steps to verify the persistent KV cache is working:
+
+**Step 1: Start the server with persistent cache enabled**
+
+```bash
+INFERENCE_ENABLE_PERSISTENT_CACHE=true \
+INFERENCE_PERSISTENT_CACHE_DIR=.cache/kv \
+INFERENCE_MODEL_PATH=/path/to/your/model \
+uv run python main.py
+```
+
+**Step 2: Make requests with repeated prefixes**
+
+```bash
+# First request - computes and caches KV states
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "system", "content": "You are a helpful coding assistant."},
+      {"role": "user", "content": "What is Python?"}
+    ],
+    "max_tokens": 100
+  }'
+
+# Second request with same system prompt - should use cached KV states
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "system", "content": "You are a helpful coding assistant."},
+      {"role": "user", "content": "How do I read a file?"}
+    ],
+    "max_tokens": 100
+  }'
+```
+
+**Step 3: Check cache statistics**
+
+```bash
+curl http://localhost:8000/v1/cache/stats | python -m json.tool
+```
+
+Look for these fields:
+- `persistent_hits` - Cache hits from persistent storage
+- `persistent_backend.memory_entries` - Entries in memory tier
+- `persistent_backend.disk_entries` - Entries on disk
+- `persistent_backend.disk_size_mb` - Disk usage
+
+**Step 4: Test persistence across restarts**
+
+```bash
+# Stop the server (Ctrl+C), then restart it
+INFERENCE_ENABLE_PERSISTENT_CACHE=true \
+INFERENCE_PERSISTENT_CACHE_DIR=.cache/kv \
+INFERENCE_MODEL_PATH=/path/to/your/model \
+uv run python main.py
+
+# Make a request with the same system prompt - should load from disk
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "system", "content": "You are a helpful coding assistant."},
+      {"role": "user", "content": "What is recursion?"}
+    ],
+    "max_tokens": 100
+  }'
+
+# Verify disk cache was used
+curl http://localhost:8000/v1/cache/stats
+```
+
+**Step 5: Inspect disk cache files**
+
+```bash
+# View cached files
+ls -la .cache/kv/
+
+# Check disk usage
+du -sh .cache/kv/
+```
+
 ### Recommended Settings
 
 | Scenario | Memory Size | Disk Size | Compression | TTL |
